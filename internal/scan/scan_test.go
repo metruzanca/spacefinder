@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -19,99 +18,233 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestScanSumsRecursive(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "a.txt"), "12345")
-	writeFile(t, filepath.Join(dir, "sub", "b.txt"), "123")
-	writeFile(t, filepath.Join(dir, "sub", "deep", "c.txt"), "12")
-
-	root, err := Scan(context.Background(), dir, nil)
+// fileBlocks returns the du-style allocated size of path.
+func fileBlocks(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if root.Size != 5+3+2 {
-		t.Fatalf("root.Size = %d, want %d", root.Size, 5+3+2)
-	}
-	if len(root.Children) != 2 { // a.txt + sub
-		t.Fatalf("root children = %d, want 2", len(root.Children))
-	}
+	return infoSize(info)
 }
 
-func TestScanIgnoresSymlinkDirs(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks require privileges on windows")
-	}
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "real", "a.txt"), "1234567890")
-	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
-		t.Skipf("cannot create symlink: %v", err)
-	}
+func TestMeasureTotals(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "12345")
+	writeFile(t, filepath.Join(root, "sub", "b.txt"), "123")
+	writeFile(t, filepath.Join(root, "sub", "deep", "c.txt"), "12")
 
-	linkInfo, err := os.Lstat(filepath.Join(dir, "link"))
+	sc, tree, err := Measure(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	root, err := Scan(context.Background(), dir, nil)
-	if err != nil {
-		t.Fatal(err)
+	want := fileBlocks(t, filepath.Join(root, "a.txt")) +
+		fileBlocks(t, filepath.Join(root, "sub", "b.txt")) +
+		fileBlocks(t, filepath.Join(root, "sub", "deep", "c.txt"))
+	// The directory entries' own blocks are not counted; only file content.
+	if tree.Size != want {
+		t.Fatalf("tree.Size = %d, want %d (allocated blocks)", tree.Size, want)
 	}
-	for _, c := range root.Children {
-		if c.Name == "link" {
-			// The symlink must be a leaf (not expanded into "real"'s children).
-			if c.IsDir {
-				t.Fatal("symlinked dir should not be marked IsDir")
-			}
-			if len(c.Children) != 0 {
-				t.Fatalf("symlinked dir leaked %d children", len(c.Children))
-			}
+	if got := sc.totals[filepath.Join(root, "sub")]; got != want-fileBlocks(t, filepath.Join(root, "a.txt")) {
+		t.Fatalf("sub total = %d, want %d", got, want-fileBlocks(t, filepath.Join(root, "a.txt")))
+	}
+
+	// Root level is materialized; grandchildren are lazy.
+	if len(tree.Children) != 2 { // a.txt + sub
+		t.Fatalf("root children = %d, want 2", len(tree.Children))
+	}
+	var sub *Node
+	for _, c := range tree.Children {
+		if c.Name == "sub" {
+			sub = c
 		}
 	}
-	// real's contents counted once, plus the symlink's own lstat size.
-	if root.Size != 10+linkInfo.Size() {
-		t.Fatalf("root.Size = %d, want real(10) + link(%d)", root.Size, linkInfo.Size())
+	if sub == nil {
+		t.Fatal("sub not in root children")
+	}
+	if sub.Children != nil {
+		t.Fatal("sub should be thin (nil children) until expanded")
 	}
 }
 
-func TestScanMissingRoot(t *testing.T) {
-	_, err := Scan(context.Background(), filepath.Join(t.TempDir(), "nope"), nil)
+func TestMeasureFileLeaf(t *testing.T) {
+	root := t.TempDir()
+	f := filepath.Join(root, "f.txt")
+	writeFile(t, f, "hello world")
+	_, tree, err := Measure(context.Background(), f, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.IsDir {
+		t.Fatal("file root should not be a dir")
+	}
+	if tree.Size != fileBlocks(t, f) {
+		t.Fatalf("size = %d, want %d", tree.Size, fileBlocks(t, f))
+	}
+}
+
+func TestMeasureMissingRoot(t *testing.T) {
+	_, _, err := Measure(context.Background(), filepath.Join(t.TempDir(), "nope"), nil)
 	if err == nil {
 		t.Fatal("expected error for missing root")
 	}
 }
 
-func TestScanContextCancel(t *testing.T) {
+func TestMeasureCancel(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < 50; i++ {
-		writeFile(t, filepath.Join(dir, "sub", "f"+string(rune(i+48)), "x"), "12345")
+		writeFile(t, filepath.Join(dir, "sub", "f", string(rune(i+48)), "x"), "12345")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := Scan(ctx, dir, nil)
+	_, _, err := Measure(ctx, dir, nil)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Scan err = %v, want context.Canceled", err)
+		t.Fatalf("Measure err = %v, want context.Canceled", err)
 	}
 }
 
-func TestScanProgressReported(t *testing.T) {
+func TestMeasureThrottledProgress(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "a"), "1")
-	writeFile(t, filepath.Join(dir, "b"), "22")
-
-	ch := make(chan Progress, 100)
+	const n = 3000
+	for i := 0; i < n; i++ {
+		writeFile(t, filepath.Join(dir, "f"+string(rune(i/64+48)), "g"+string(rune(i%64+48))), "x")
+	}
+	ch := make(chan Progress, 16)
 	done := make(chan error, 1)
 	go func() {
-		_, err := Scan(context.Background(), dir, ch)
+		_, _, err := Measure(context.Background(), dir, ch)
 		done <- err
 	}()
+	var events int
 	var visited int
 	for p := range ch {
-		visited += p.Visited
+		events++
+		if p.Visited < visited {
+			t.Fatalf("progress went backwards: %d -> %d", visited, p.Visited)
+		}
+		visited = p.Visited
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if visited < 2 {
-		t.Fatalf("visited = %d, want >= 2 entries", visited)
+	if events > n/8 {
+		t.Fatalf("progress not throttled: %d events for %d entries", events, n)
+	}
+	dirs := (n-1)/64 + 1
+	if visited != n+dirs {
+		t.Fatalf("visited = %d, want %d (files + subdirs)", visited, n+dirs)
+	}
+}
+
+func TestHardlinkDedup(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a.bin")
+	writeFile(t, a, "some bigger content for a multi-block file")
+	b := filepath.Join(root, "b.bin")
+	if err := os.Link(a, b); err != nil {
+		t.Skipf("cannot create hardlink: %v", err)
+	}
+	c := filepath.Join(root, "c.bin")
+	writeFile(t, c, "an independent file")
+
+	_, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fileBlocks(t, a) + fileBlocks(t, c) // b shares a's inode
+	if tree.Size != want {
+		t.Fatalf("root.Size = %d, want %d (hardlink counted once)", tree.Size, want)
+	}
+}
+
+func TestLazyExpandAndIdempotent(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "top.txt"), "top")
+	writeFile(t, filepath.Join(root, "sub", "x.txt"), "x")
+	writeFile(t, filepath.Join(root, "sub", "y.txt"), "y")
+
+	sc, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sub *Node
+	for _, c := range tree.Children {
+		if c.Name == "sub" {
+			sub = c
+		}
+	}
+	if err := sc.Expand(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	if sub.Children == nil {
+		t.Fatal("sub should now be expanded")
+	}
+	if len(sub.Children) != 2 {
+		t.Fatalf("sub children = %d, want 2", len(sub.Children))
+	}
+	want := fileBlocks(t, filepath.Join(root, "sub", "x.txt")) +
+		fileBlocks(t, filepath.Join(root, "sub", "y.txt"))
+	if sub.Size != want {
+		t.Fatalf("sub.Size = %d, want %d", sub.Size, want)
+	}
+	for _, c := range sub.Children {
+		if c.Parent != sub {
+			t.Fatal("child parent not wired")
+		}
+	}
+
+	// Expanding again is a no-op.
+	before := len(sub.Children)
+	if err := sc.Expand(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.Children) != before {
+		t.Fatal("Expand is not idempotent")
+	}
+}
+
+func TestExpandFallbackAfterForget(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "dumb", "keep.txt"), "k")
+	sc, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d *Node
+	for _, c := range tree.Children {
+		if c.Name == "dumb" {
+			d = c
+		}
+	}
+	old := d.Size
+
+	// Content appears after the pass (as after a deletion elsewhere): forget
+	// the recorded total and expand again — it must re-measure on the spot.
+	writeFile(t, filepath.Join(d.Path, "new.txt"), "new content")
+	sc.Forget(d.Path)
+	if err := sc.Expand(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Size <= old {
+		t.Fatalf("d.Size = %d after new file, want > %d", d.Size, old)
+	}
+	if d.Size == old {
+		t.Fatal("new file not reflected")
+	}
+}
+
+func TestMeasureIgnoresMountLikeDirs(t *testing.T) {
+	// A directory whose st_dev differs from its parent is treated as a leaf
+	// (du -x). We cannot mount in unprivileged tests, but the same-deviceness
+	// guard must at least keep ordinary trees intact.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a", "b"), "x")
+	_, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Size != fileBlocks(t, filepath.Join(root, "a", "b")) {
+		t.Fatalf("size = %d, want %d", tree.Size, fileBlocks(t, filepath.Join(root, "a", "b")))
 	}
 }

@@ -34,6 +34,8 @@ func (m *Model) View() string {
 	switch m.mode {
 	case modeSplash:
 		return m.splashView()
+	case modeMeasuring:
+		return m.measuringView()
 	case modeError:
 		return m.errorView()
 	}
@@ -367,6 +369,26 @@ func (m *Model) splashView() string {
 		),
 	}
 	// Vertically center within the terminal.
+	pad := (m.height - len(lines)) / 2
+	if pad < 1 {
+		pad = 1
+	}
+	out := make([]string, 0, pad+len(lines))
+	for i := 0; i < pad; i++ {
+		out = append(out, "")
+	}
+	return strings.Join(append(out, lines...), "\n")
+}
+
+// measuringView is shown briefly while a drilled directory's next level is
+// measured on demand (usually under a second).
+func (m *Model) measuringView() string {
+	lines := []string{
+		"",
+		accent().Render(m.spinner.View()) + "  Measuring " + lipgloss.NewStyle().Bold(true).Render(m.pending.Path),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("this expands one level; sizes below are already known from the scan"),
+	}
 	pad := (m.height - len(lines)) / 2
 	if pad < 1 {
 		pad = 1

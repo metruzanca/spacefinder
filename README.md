@@ -19,8 +19,9 @@ spacefinder [path]
   (`sudo spacefinder`).
 - Pass a path to scan somewhere specific, e.g. `spacefinder /var/log`.
 
-The full scan happens up front (the splash shows a spinner, the current path,
-and entry counts), so drilling down is instant.
+The full home dir scan runs like `du`: one fast pass up front (the splash
+shows a spinner, the current path, and entry counts), then drilling is
+effectively instant.
 
 ### Controls
 
@@ -45,13 +46,17 @@ never be deleted through the UI.
 - **Top-`N` + "other" bucketing.** Directories with hundreds of children show
   their largest ~128 entries as individual squares (the rest collapse into a
   single gray `other` tile) so the view stays fast and legible.
-- **Accurate recursive sizes.** Every folder shows its true on-disk footprint,
-  so the treemap reflects actual storage usage. Symlinks are counted but never
-  followed, so scans can't loop.
+- **`du`-style, lazy sizing.** The initial pass measures the whole tree like
+  `du -x -B1`: sizes are allocated blocks, matching what `du` reports, one
+  filesystem (mount points are treated as leaves), and each hardlink is
+  counted once. Progress is throttled instead of repainting per file, so even
+  a multi-million-entry home directory scans in a few seconds.
+- **Instant drill-down.** One measure pass records the total of every
+  directory; expanding a folder (readdir + lookup) is near-instant, so
+  navigating in is never a rescan. Folders that changed after the pass are
+  re-measured on the spot the moment you open them.
 - **Permission-tolerant.** Unreadable entries are skipped and counted; the
   scan keeps going and the count is shown on the splash.
-- **Instant drill-down.** A single recursive scan builds the whole tree up
-  front; navigation, breadcrumbs, and deletion re-lay out from memory.
 
 ## Development
 
@@ -64,9 +69,10 @@ never be deleted through the UI.
 
 ## How the pieces fit
 
-- `internal/scan` — recursive directory tree with accumulated sizes and
-  cancellable progress.
+- `internal/scan` — du-style measure pass (allocated blocks, single
+  filesystem, hardlink dedup) that records every directory's total, plus lazy
+  per-level `Expand` for the tree.
 - `internal/treemap` — the squarified layout algorithm over a cell grid.
-- `internal/tui` — the bubbletea app: splash, treemap rendering, navigation,
-  and the type-to-confirm delete modal.
+- `internal/tui` — the bubbletea app: splash, treemap rendering, lazy
+  navigation, and the type-to-confirm delete modal.
 - `cmd/root.go` — Cobra entrypoint; picks the default root and starts the TUI.

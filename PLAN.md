@@ -3,3 +3,23 @@ Inspired by spacesniffer on windows and filelight on linux. Spacefinder is a TUI
 If the program is run as a user, it should by default use $HOME as the root of the scan. If they use `sudo spacefinder` it should use /.
 
 The goal of spacefinder is to visually help the user find where their main storage bottlenecks are and if they want, delete them.
+
+## Scanning strategy (implemented)
+
+The scan behaves like `du -x -B1 --max-depth=1`, but lazily:
+
+- Sizes are **allocated blocks** (not apparent size), matching `du`, across a
+  **single filesystem** (mount points are treated as leaves), with **hardlinks
+  counted once**.
+- One fast measure pass records the total size of every directory; it does not
+  build a deep tree. Progress is **throttled** (~20 events/s), never one vsync
+  per entry — that per-entry progress was the reason a full home-dir scan
+  appeared to hang (a full 128-slot channel deadlocked the scanner).
+- **Lazy expansion**: the treemap materializes one level at a time. Drilling
+  into a folder is a readdir plus a look-up in the recorded totals
+  (measure-then-open); folders changed since the pass are re-measured on the
+  spot. No "unmeasured tiles" are needed because every displayed level carries
+  real totals.
+- Deletion subtracts the removed entry's real size up the visible ancestor
+  chain and invalidates its recorded total so a repeat of that folder is
+  re-measured correctly.

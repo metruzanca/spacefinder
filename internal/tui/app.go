@@ -24,13 +24,21 @@ type mode int
 
 const (
 	modeSplash mode = iota
+	modeMeasuring
 	modeBrowse
 	modeConfirm
 	modeError
 )
 
 type scanDoneMsg struct {
-	tree *scan.Node
+	gen     int
+	scanner *scan.Scanner
+	root    *scan.Node
+	err     error
+}
+
+type expandDoneMsg struct {
+	node *scan.Node
 	err  error
 }
 
@@ -46,11 +54,14 @@ type Model struct {
 	start time.Time
 
 	// scan state
+	scanGen    int
 	cancelScan context.CancelFunc
 	progressCh chan scan.Progress
 	progress   scan.Progress
 	spinner    spinner.Model
+	scanner    *scan.Scanner
 	tree       *scan.Node
+	pending    *scan.Node // directory being expanded on demand (modeMeasuring)
 
 	// browse state
 	current *scan.Node
@@ -99,29 +110,43 @@ func Run(rootPath string) error {
 }
 
 func (m *Model) Init() tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelScan = cancel
-	return tea.Batch(m.spinner.Tick, m.scanCmd(ctx), m.progressCmd())
+	return tea.Batch(m.spinner.Tick, m.startScan(0), m.progressCmd())
 }
 
-// scanCmd runs the recursive scan to completion in a background goroutine and
-// reports the finished tree when it arrives.
-func (m *Model) scanCmd(ctx context.Context) tea.Cmd {
+// startScan runs a fresh measure pass of the root and reports its result. The
+// generation allows stale results (from a cancelled rescan) to be ignored.
+func (m *Model) startScan(gen int) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelScan = cancel
+	ch := m.progressCh
 	return func() tea.Msg {
-		tree, err := scan.Scan(ctx, m.rootPath, m.progressCh)
-		return scanDoneMsg{tree: tree, err: err}
+		scanner, root, err := scan.Measure(ctx, m.rootPath, ch)
+		return scanDoneMsg{gen: gen, scanner: scanner, root: root, err: err}
 	}
 }
 
-// progressCmd forwards one progress event per invocation; it returns nil (a
-// no-op) once the progress channel closes, ending the redeliver loop.
+// progressCmd forwards one throttled progress event per invocations; it returns
+// nil (a no-op) once the progress channel closes, ending the redeliver loop.
 func (m *Model) progressCmd() tea.Cmd {
+	ch := m.progressCh
 	return func() tea.Msg {
-		p, ok := <-m.progressCh
+		p, ok := <-ch
 		if !ok {
 			return nil
 		}
 		return scanProgressMsg(p)
+	}
+}
+
+// expandCmd measures the next level of a directory (usually instant, since the
+// totals were recorded by the initial pass) before it is opened.
+func (m *Model) expandCmd(node *scan.Node) tea.Cmd {
+	sc := m.scanner
+	return func() tea.Msg {
+		if sc == nil {
+			return expandDoneMsg{node: node}
+		}
+		return expandDoneMsg{node: node, err: sc.Expand(context.Background(), node)}
 	}
 }
 
@@ -138,7 +163,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKeys(msg)
 
 	case spinner.TickMsg:
-		if m.mode == modeSplash {
+		if m.mode == modeSplash || m.mode == modeMeasuring {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -147,16 +172,38 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanProgressMsg:
 		m.progress = scan.Progress(msg)
-		return m, nil
+		// Re-arm the consumer so the drain loop keeps running; otherwise the
+		// scan's progress channel fills and the measure goroutine blocks.
+		return m, m.progressCmd()
 
-	case scanDoneMsg:
+	case expandDoneMsg:
+		if msg.node != m.pending {
+			return m, nil // stale or cancelled
+		}
+		m.pending = nil
 		if msg.err != nil {
 			m.mode = modeError
 			m.errMessage = msg.err.Error()
 			return m, nil
 		}
-		m.tree = msg.tree
-		m.current = msg.tree
+		m.crumbs = append(m.crumbs, m.current)
+		m.current = msg.node
+		m.mode = modeBrowse
+		m.buildLayout()
+		return m, nil
+
+	case scanDoneMsg:
+		if msg.gen != m.scanGen {
+			return m, nil // result of a cancelled rescan
+		}
+		if msg.err != nil {
+			m.mode = modeError
+			m.errMessage = msg.err.Error()
+			return m, nil
+		}
+		m.scanner = msg.scanner
+		m.tree = msg.root
+		m.current = msg.root
 		m.crumbs = nil
 		m.mode = modeBrowse
 		m.buildLayout()
@@ -170,6 +217,15 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeSplash, modeError:
 		if isQuit(msg) {
 			return m.quit()
+		}
+	case modeMeasuring:
+		switch {
+		case isQuit(msg):
+			return m.quit()
+		case msg.Type == tea.KeyEsc:
+			m.pending = nil
+			m.mode = modeBrowse
+			return m, nil
 		}
 	case modeConfirm:
 		return m.updateConfirm(msg)
@@ -187,7 +243,7 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openConfirm()
 		return m, nil
 	case msg.Type == tea.KeyEnter:
-		m.drill()
+		return m, m.drill()
 	case msg.String() == "r":
 		return m, m.rescan()
 	case msg.Type == tea.KeyEsc:
@@ -278,36 +334,51 @@ func (m *Model) doDelete() (tea.Model, tea.Cmd) {
 	for _, anc := range m.crumbs {
 		anc.Size -= n.Size
 	}
+	// Drop the stale recorded total so a future repeat of this directory is
+	// re-measured on the spot.
+	if m.scanner != nil {
+		m.scanner.Forget(n.Path)
+	}
 	m.closeConfirm()
 	m.buildLayout()
 	return m, nil
 }
 
-// rescan starts a fresh full scan of the root and returns the command batch to
-// run it. Existing scan work is cancelled first.
+// rescan starts a fresh measure of the root and returns the command batch to
+// run it. Existing scan work is cancelled and its result will be ignored.
 func (m *Model) rescan() tea.Cmd {
 	if m.cancelScan != nil {
 		m.cancelScan()
 	}
+	m.scanGen++
 	m.progress = scan.Progress{}
 	m.progressCh = make(chan scan.Progress, 128)
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelScan = cancel
 	m.mode = modeSplash
+	m.scanner = nil
 	m.tree = nil
 	m.current = nil
 	m.crumbs = nil
-	return tea.Batch(m.spinner.Tick, m.scanCmd(ctx), m.progressCmd())
+	m.pending = nil
+	return tea.Batch(m.spinner.Tick, m.startScan(m.scanGen), m.progressCmd())
 }
 
-func (m *Model) drill() {
+// drill opens the selected directory. If its children have not been expanded
+// yet, it starts a measurement pass first (measure-then-open) and returns the
+// command to run it.
+func (m *Model) drill() tea.Cmd {
 	n := m.selectedNode()
 	if n == nil || !n.IsDir {
-		return
+		return nil
+	}
+	if n.Children == nil && m.scanner != nil {
+		m.mode = modeMeasuring
+		m.pending = n
+		return m.expandCmd(n)
 	}
 	m.crumbs = append(m.crumbs, m.current)
 	m.current = n
 	m.buildLayout()
+	return nil
 }
 
 func (m *Model) up() {
