@@ -36,7 +36,7 @@ spacefinder [path]
 
 `path` defaults to user's home directory or root if root.
 
-Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in. `del` to delete(with confirmation) and `q` to quit.
+Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in (or to open a file in its OS default application). `del` to delete (with confirmation) and `q` to quit.
 
 ## TODO
 

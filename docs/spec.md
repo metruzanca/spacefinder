@@ -8,9 +8,10 @@ or partition as a treemap of squares whose sizes reflect each folder's disk
 usage. The application is built on [charmbracelet/bubbletea](https://github.com/charmbracelet/bubbletea)
 and runs on the alternate screen buffer.
 
-The user navigates the treemap with arrow keys or Vim keys, drills into a
-block with `Enter`, and deletes unwanted entries. Breadcrumbs show the current
-path at the top of the screen and keybind help is displayed at the bottom.
+The user navigates the treemap with arrow keys, Vim keys, or the mouse, drills
+into a block with `Enter` (or a double-click), opens files in their OS default
+application, and deletes unwanted entries. Breadcrumbs show the current path at
+the top of the screen and keybind help is displayed at the bottom.
 
 ## Objective
 
@@ -26,16 +27,36 @@ locate bottlenecks and, if desired, delete them.
 
 - The treemap renders the full capacity of the selected path, so the largest
   blocks represent the heaviest consumers.
-- Arrow keys or Vim keys (`h`/`j`/`k`/`l`) move the selection between blocks.
-- `Enter` drills down into the selected block, re-rendering the treemap for
-  that path.
+- Arrow keys or Vim keys (`h`/`j`/`k`/`l`) move the selection between blocks,
+  snapping between block edges rather than by cell.
+- `Enter` drills down into the selected directory, re-rendering the treemap
+  for that path; it is a no-op on a file.
+- `Esc` steps back up one level (and cancels a measurement still in flight).
+- `r` rescans the root from scratch.
+- `q` (or `Ctrl+C`) quits.
 - Breadcrumbs at the top of the screen show the current location.
+
+## Mouse
+
+Mouse cell motion is enabled on the alternate screen.
+
+- Left-click selects the block under the cursor.
+- Double-click within the debounce window (~350 ms) on the same block opens
+  the entry: directories drill in, and files are launched in the OS default
+  application via `open` (macOS), `xdg-open` (Linux), or
+  `rundll32 url.dll,FileProtocolHandler` (Windows). The opener runs detached,
+  so a long-running app does not tie up the TUI; only launch failures surface
+  as errors.
+- Right-click goes up a level.
+- The mouse wheel moves the selection up and down.
 
 ## Deletion
 
 Pressing `Delete` (or `Backspace`) deletes the selected file or folder.
 Deletion **always** requires confirmation: the user must type the exact name
 of the entry they are deleting in a modal prompt before the action proceeds.
+A mismatch shows an error and nothing is deleted. The scan root itself can
+never be deleted through the UI.
 
 ## Scanning Strategy
 
@@ -59,6 +80,9 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
 - **Deletion bookkeeping**: deleting an entry subtracts its real size up the
   visible ancestor chain and invalidates its recorded total, so a repeat of
   that folder is re-measured correctly.
+- **UI feedback**: the scan shows a splash screen (spinner, current path, entry
+  counts); drilling shows a brief measuring view; failures land on an error
+  screen. `Esc` cancels a measurement, `q` quits from any state.
 
 ## Rendering
 
@@ -76,3 +100,8 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
 - **Free-space gutter**: a gutter row (statfs free bytes on the partition)
   shows at the scan root only, capped to a few rows so the content map keeps
   the screen.
+- **Entry cap**: at most 200 blocks are laid out per level; anything beyond
+  folds into a single non-selectable "other" bucket.
+- **Hidden children**: entries too small to earn a meaningful tile (fewer than
+  4 cells) are neither rendered nor selectable, but their count is surfaced in
+  the status line.

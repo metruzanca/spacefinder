@@ -17,8 +17,9 @@ var rootCmd = &cobra.Command{
 	Short: "Visualize disk usage as a treemap in your terminal",
 	Long: `spacefinder scans a directory tree and renders it as a squarified
 treemap spanning the whole screen, the way spacesniffer and filelight do.
-Navigate with the arrow or vim keys, drill into directories with Enter, and
-delete junk (after typing its name to confirm) with Delete.
+Navigate with the arrow or vim keys, drill into directories with Enter,
+double-click a file to open it in its default app, and delete junk (after
+typing its name to confirm) with Delete.
 
 Without a path, the scan starts at $HOME, or at / when run as root.`,
 	Args:         cobra.MaximumNArgs(1),

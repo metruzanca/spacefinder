@@ -404,7 +404,7 @@ func (m *Model) statusLine() string {
 		max = 1
 	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	hint := "click=sel · 2x=drill · esc=up · del=delete · q=quit"
+	hint := "click=sel · 2x=drill/open · esc=up · del=delete · q=quit"
 
 	var left string
 	if n := m.selectedNode(); n != nil {

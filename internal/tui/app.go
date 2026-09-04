@@ -48,6 +48,11 @@ type expandDoneMsg struct {
 	err  error
 }
 
+type openDoneMsg struct {
+	path string
+	err  error
+}
+
 type scanProgressMsg scan.Progress
 
 // Model is the bubbletea model for spacefinder.
@@ -219,6 +224,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.buildLayout()
 		return m, nil
 
+	case openDoneMsg:
+		if msg.err != nil {
+			m.mode = modeError
+			m.errMessage = fmt.Sprintf("open %s: %v", msg.path, msg.err)
+		}
+		return m, nil
+
 	case scanDoneMsg:
 		if msg.gen != m.scanGen {
 			return m, nil // result of a cancelled rescan
@@ -325,7 +337,8 @@ func (m *Model) quit() (tea.Model, tea.Cmd) {
 }
 
 // updateMouse handles pointer interaction: click selects, a same-tile click
-// within the debounce window drills in, right-click goes up, and the wheel
+// within the debounce window opens the entry (drilling into a directory,
+// launching a file in the OS default app), right-click goes up, and the wheel
 // moves the selection.
 func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
@@ -340,6 +353,10 @@ func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.lastClick = now
 		m.sel = tile
 		if double {
+			n := m.selectedNode()
+			if n != nil && !n.IsDir {
+				return m, m.openFile()
+			}
 			return m, m.drill()
 		}
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
@@ -444,6 +461,23 @@ func (m *Model) drill() tea.Cmd {
 	m.current = n
 	m.buildLayout()
 	return nil
+}
+
+// openFile launches the selected file in the OS default application. The
+// command is started detached and only its launch errors are reported, so an
+// app that stays open (a media player, an editor) does not tie up the TUI.
+func (m *Model) openFile() tea.Cmd {
+	n := m.selectedNode()
+	if n == nil || n.IsDir {
+		return nil
+	}
+	path := n.Path
+	return func() tea.Msg {
+		if err := openDefault(path).Start(); err != nil {
+			return openDoneMsg{path: path, err: err}
+		}
+		return nil
+	}
 }
 
 func (m *Model) up() {
