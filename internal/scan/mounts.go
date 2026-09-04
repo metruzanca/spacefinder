@@ -21,6 +21,11 @@ type Mount struct {
 func Mounts() []Mount {
 	out := filterMounts(systemMounts())
 	for i := range out {
+		if WSL() {
+			// On WSL free space reflects the host Windows disk, not the virtual
+			// disk; suppress it so the picker does not show a misleading figure.
+			continue
+		}
 		out[i].Free, _ = Free(out[i].Path)
 	}
 	return out
