@@ -676,6 +676,7 @@ func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
 	m.crumbs = nil
 	m.pending = nil
 	m.freeBytes = 0
+	m.sel = -1 // a fresh layout starts from the first tile, not the old picker position
 	m.mode = modeSplash
 	m.start = time.Now()
 	logging.Debugf("tui root path: %s", path)
@@ -841,6 +842,7 @@ func (m *Model) rescan() tea.Cmd {
 	m.current = nil
 	m.crumbs = nil
 	m.pending = nil
+	m.sel = -1 // a fresh scan restarts the selection at the first tile
 	return tea.Batch(m.spinner.Tick, m.startScan(m.scanGen), m.progressCmd())
 }
 

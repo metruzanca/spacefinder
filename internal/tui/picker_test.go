@@ -83,6 +83,30 @@ func TestPickerEnterStartsScan(t *testing.T) {
 	}
 }
 
+// TestScanResetsSelectionToFirst checks that picking a volume does not carry
+// the picker's grid position into the scanned volume's treemap: after the scan
+// completes, the selection snaps to the first tile.
+func TestScanResetsSelectionToFirst(t *testing.T) {
+	m := pickerModel()
+	m.moveSel(1, 0) // leave the initial tile
+	stale := m.sel
+	if stale < 1 {
+		t.Skip("picker layout has no second tile to select")
+	}
+	got, _ := m.Update(keyType(tea.KeyEnter)) // choose -> beginScan
+	mm := got.(*Model)
+	// Complete the scan with a disposable tree so buildLayout runs.
+	got, _ = mm.Update(scanDoneMsg{gen: mm.scanGen, root: testTree()})
+	mm = got.(*Model)
+	if mm.mode != modeBrowse {
+		t.Fatalf("mode = %v, want modeBrowse after scan", mm.mode)
+	}
+	first := firstSelectable(mm.rects)
+	if mm.sel != first {
+		t.Fatalf("selection = %d, want first selectable %d (stale picker position was %d)", mm.sel, first, stale)
+	}
+}
+
 func TestPickerQuitsOnQ(t *testing.T) {
 	var out bytes.Buffer
 	p := tea.NewProgram(pickerModel(),
