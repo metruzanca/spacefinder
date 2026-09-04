@@ -36,8 +36,9 @@ spacefinder [path]
 
 Without a `path`, spacefinder opens a picker: choose where to scan from your
 home directory, the filesystem root, the current directory, or any other
-detected drive or partition (each showing its free space). `enter` starts the
-scan, `q` quits. With a `path`, the scan starts there directly.
+detected drive or partition. Drives show their free space; the current
+directory shows a rough `du` estimate of its size. `enter` starts the scan,
+`q` quits. With a `path`, the scan starts there directly.
 
 Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in (or to open a file in its OS default application). `del` to delete (with confirmation) and `q` to quit.
 

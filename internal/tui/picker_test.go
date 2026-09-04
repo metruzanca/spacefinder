@@ -3,8 +3,10 @@ package tui
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -12,7 +14,16 @@ import (
 func pickerModel() *Model {
 	m := newModel("")
 	m.width, m.height = 80, 24
+	m.buildPickerLayout()
 	return m
+}
+
+func pickerPaths(m *Model) []string {
+	paths := make([]string, len(m.pickerNodes))
+	for i, n := range m.pickerNodes {
+		paths[i] = n.Path
+	}
+	return paths
 }
 
 func TestNewModelEmptyStartsPicker(t *testing.T) {
@@ -20,8 +31,8 @@ func TestNewModelEmptyStartsPicker(t *testing.T) {
 	if m.mode != modePicker {
 		t.Fatalf("mode = %v, want modePicker", m.mode)
 	}
-	if m.picker.Items() == nil || len(m.picker.Items()) < 2 {
-		t.Fatalf("picker has %d items, want at least home+root", len(m.picker.Items()))
+	if len(m.pickerNodes) < 2 {
+		t.Fatalf("picker has %d options, want at least home+root", len(m.pickerNodes))
 	}
 }
 
@@ -31,27 +42,34 @@ func TestPickerHasHomeAndRoot(t *testing.T) {
 	if err != nil {
 		t.Skip("no $HOME")
 	}
-	seen := map[string]bool{}
-	for _, it := range m.picker.Items() {
-		seen[it.(pickerItem).path] = true
+	paths := pickerPaths(m)
+	if paths[0] != home {
+		t.Fatalf("first picker option = %q, want home %q (pre-selected)", paths[0], home)
 	}
-	if !seen[home] {
-		t.Fatal("picker missing home entry")
+	for _, p := range paths {
+		if p == fsRoot(home, "") {
+			return
+		}
 	}
-	if !seen[fsRoot(home, "")] {
-		t.Fatal("picker missing root entry")
+	t.Fatal("picker missing root entry")
+}
+
+func TestPickerHomePreSelected(t *testing.T) {
+	m := pickerModel()
+	n := m.selectedPickerNode()
+	if n == nil {
+		t.Fatal("no picker tile selected")
 	}
-	// Home is pre-selected.
-	if it := m.picker.SelectedItem(); it == nil || it.(pickerItem).path != home {
-		t.Fatal("home not pre-selected")
+	home, _ := os.UserHomeDir()
+	if n.Path != home {
+		t.Fatalf("selected tile = %q, want home %q", n.Path, home)
 	}
 }
 
-func TestPickerDownThenEnterStartsScan(t *testing.T) {
+func TestPickerEnterStartsScan(t *testing.T) {
 	m := pickerModel()
-	// Move down one and select: the second entry must become the scan root.
-	m.picker.CursorDown()
-	want := m.picker.SelectedItem().(pickerItem).path
+	m.moveSel(0, 1)
+	want := m.selectedPickerNode().Path
 	got, cmd := m.Update(keyType(tea.KeyEnter))
 	mm := got.(*Model)
 	if mm.mode != modeSplash {
@@ -61,7 +79,7 @@ func TestPickerDownThenEnterStartsScan(t *testing.T) {
 		t.Fatalf("rootPath = %q, want %q", mm.rootPath, want)
 	}
 	if cmd == nil {
-		t.Fatal("beginScan returned no startup command")
+		t.Fatal("choosePicker returned no startup command")
 	}
 }
 
@@ -95,29 +113,126 @@ func TestPickerViewRenders(t *testing.T) {
 	if v == "" {
 		t.Fatal("picker view empty")
 	}
-	if !strings.Contains(v, "Where should we look?") {
+	if !strings.Contains(v, "pick a location to scan") {
 		t.Fatal("picker title missing")
 	}
-	if !strings.Contains(v, "free") && !strings.Contains(v, "home") {
-		t.Fatal("picker view missing entries; got:\n" + v)
+	if !strings.Contains(v, "home") {
+		t.Fatalf("picker tiles missing; got:\n%s", v)
 	}
-	if !strings.Contains(v, "enter to scan") {
+	if !strings.Contains(v, "enter or 2x=scan") {
 		t.Fatal("picker hint missing")
 	}
 }
 
 func TestPickerArrowsMoveSelection(t *testing.T) {
-	m := pickerModel()
-	before := m.picker.SelectedItem().(pickerItem).path
-	m.Update(keyRunes("j"))
-	after := m.picker.SelectedItem().(pickerItem).path
-	if after == before {
-		t.Fatal("j did not move the picker selection")
+	start := pickerModel().selectedPickerNode().Path
+	moved := false
+	for _, key := range []string{"l", "h", "j", "k"} {
+		m := pickerModel()
+		m.Update(keyRunes(key))
+		if m.selectedPickerNode().Path != start {
+			moved = true
+		}
 	}
-	m.Update(keyRunes("k"))
-	want := m.picker.SelectedItem().(pickerItem).path
-	if want != before {
-		t.Fatalf("k did not move back: want start %q, got %q", before, want)
+	if !moved {
+		t.Fatal("no arrow key moved the picker selection")
+	}
+}
+
+func TestPickerNavStaysValid(t *testing.T) {
+	m := pickerModel()
+	for _, key := range []string{"l", "h", "j", "k", "l", "h", "j", "k"} {
+		m.Update(keyRunes(key))
+		if m.sel < 0 || m.sel >= len(m.rects) {
+			t.Fatalf("selection out of range after %q: %d", key, m.sel)
+		}
+		if m.selectedPickerNode() == nil {
+			t.Fatalf("selection on a non-tile after %q", key)
+		}
+	}
+}
+
+// TestPickerTilesSimilarSized verifies the "all options like similar sizes"
+// requirement: equal-area tiles, so no single drive dominates the picker map.
+func TestPickerTilesSimilarSized(t *testing.T) {
+	m := pickerModel()
+	if len(m.rects) < 2 {
+		t.Skip("need at least two tiles")
+	}
+	minA, maxA := 1e18, 0.0
+	for _, r := range m.rects {
+		if r.Index < 0 {
+			continue
+		}
+		area := r.W * r.H
+		if area < minA {
+			minA = area
+		}
+		if area > maxA {
+			maxA = area
+		}
+	}
+	if ratio := maxA / minA; ratio > 2.0 {
+		t.Fatalf("tile areas differ by %.2fx; equal-area layout expected (min %.1f, max %.1f)", ratio, minA, maxA)
+	}
+}
+
+func TestPickerMouseSelectStartsScan(t *testing.T) {
+	m := pickerModel()
+	m.sel = 0
+	b := cellBounds(m.rects[0])
+	cx := b.x0 + (b.x1-b.x0)/2
+	cy := b.y0 + (b.y1-b.y0)/2
+	want := m.selectedPickerNode().Path
+	// A double-click (second press of tile 0 within the debounce window).
+	m.lastClickTile = 0
+	m.lastClick = time.Now()
+	got, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: cx, Y: cy + 1})
+	mm := got.(*Model)
+	if mm.mode != modeSplash {
+		t.Fatalf("double-click did not start the scan; mode = %v", mm.mode)
+	}
+	if mm.rootPath != want {
+		t.Fatalf("double-click scanned %q, want %q", mm.rootPath, want)
+	}
+}
+
+// TestPickerCwdSizeEstimate feeds the async du result through Update and
+// checks the current-directory tile swaps its free bytes for the rough size.
+func TestPickerCwdSizeEstimate(t *testing.T) {
+	if _, err := exec.LookPath("du"); err != nil {
+		t.Skip("du not available")
+	}
+	m := pickerModel()
+	if m.pickerCwd == nil {
+		t.Skip("no current-directory tile in this cwd")
+	}
+	cmd := m.cwdSizeCmd()
+	if cmd == nil {
+		t.Fatal("expected a du command for the picker")
+	}
+	got, _ := m.Update(cmd()) // runs du synchronously for the test
+	mm := got.(*Model)
+	if mm.pickerCwd.Size <= 0 {
+		t.Fatalf("cwd estimate not applied: %d", mm.pickerCwd.Size)
+	}
+	if !mm.pickerUsed[mm.pickerCwd] {
+		t.Fatal("cwd tile not marked as an estimate")
+	}
+	for ri, r := range mm.rects {
+		if r.Index >= 0 && r.Index < len(mm.pickerNodes) && mm.pickerNodes[r.Index] == mm.pickerCwd {
+			mm.sel = ri
+			break
+		}
+	}
+	if !strings.Contains(mm.pickerStatusLine(), "rough") {
+		t.Fatal("status line does not label the estimate")
+	}
+}
+
+func TestDuSizeMissingPath(t *testing.T) {
+	if got := duSize("/nonexistent/spacefinder/xyz"); got != 0 {
+		t.Fatalf("duSize on a missing path = %d, want 0", got)
 	}
 }
 

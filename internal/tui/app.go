@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,6 +66,13 @@ type openDoneMsg struct {
 	err  error
 }
 
+// cwdSizeMsg carries a rough top-level du estimate for the picker's
+// current-directory tile, so its size is real (not the filesystem's free
+// bytes) even before anything is scanned.
+type cwdSizeMsg struct {
+	size int64
+}
+
 type scanProgressMsg scan.Progress
 
 // Model is the bubbletea model for spacefinder.
@@ -112,7 +118,11 @@ type Model struct {
 	confirmErr  bool
 
 	// filesystem picker (modePicker, shown when spacefinder runs without a path)
-	picker list.Model
+	pickerNodes []*scan.Node          // one equal-area tile per scan target
+	pickerDesc  map[*scan.Node]string // status-line detail (device, type) per tile
+	pickerUsed  map[*scan.Node]bool   // nodes whose Size is an estimate, not free bytes
+	pickerCwd   *scan.Node            // the current-directory tile (rough du size)
+	pickerRoot  *scan.Node            // fake root so the treemap renderer is reused
 }
 
 func newModel(rootPath string) *Model {
@@ -141,20 +151,53 @@ func newModel(rootPath string) *Model {
 	if rootPath == "" {
 		m.rootPath = ""
 		m.mode = modePicker
-		m.picker = newPicker()
+		m.setupPicker()
 	}
 	return m
 }
 
-// pickerItem is one entry in the filesystem picker: the friendly row shows the
-// path to scan with a description naming the kind of entry and its free space.
-type pickerItem struct {
-	title, desc, path string
+// pickerOption is one scan target offered by the picker.
+type pickerOption struct {
+	label    string // short name drawn on the tile
+	path     string // scan root on selection
+	desc     string // status-line detail (device, type, kind)
+	free     int64  // free bytes, shown until a real scan happens
+	estimate bool   // Size should instead carry a rough du estimate
 }
 
-func (i pickerItem) Title() string       { return i.title }
-func (i pickerItem) Description() string { return i.desc }
-func (i pickerItem) FilterValue() string { return i.title + " " + i.path }
+// pickerOptions collects the scan targets in preference order: home first (the
+// most common target, and the pre-selected tile), then the filesystem root,
+// the directory spacefinder was launched from, then every detected drive or
+// partition.
+func pickerOptions() []pickerOption {
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	root := fsRoot(home, cwd)
+
+	var opts []pickerOption
+	if home != "" {
+		opts = append(opts, pickerOption{label: "home", path: home, desc: "home directory", free: freeOn(home)})
+	}
+	opts = append(opts, pickerOption{label: "root", path: root, desc: "filesystem root", free: freeOn(root)})
+	if cwd != "" && cwd != home && filepath.Clean(cwd) != root {
+		opts = append(opts, pickerOption{label: "cwd", path: cwd, desc: "current directory", free: freeOn(cwd), estimate: true})
+	}
+	for _, mo := range scan.Mounts() {
+		if mo.Path == home || mo.Path == root || mo.Path == cwd {
+			continue // already offered above
+		}
+		label := filepath.Base(mo.Path)
+		if label == "." || label == string(os.PathSeparator) {
+			label = mo.Path
+		}
+		desc := mo.Type
+		if mo.Device != "" && mo.Device != mo.Path {
+			desc = mo.Device + " (" + mo.Type + ")"
+		}
+		opts = append(opts, pickerOption{label: label, path: mo.Path, desc: desc, free: mo.Free})
+	}
+	return opts
+}
 
 // fsRoot is the "root" entry of the picker: / on unix, the volume containing
 // home (then cwd) on windows, where a lone backslash is not a real root.
@@ -172,86 +215,82 @@ func fsRoot(home, cwd string) string {
 	return string(os.PathSeparator)
 }
 
-// newPicker builds the picker list: home (pre-selected), the filesystem root,
-// the current directory, then every detected mount worth scanning.
-func newPicker() list.Model {
-	home, _ := os.UserHomeDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
-	root := fsRoot(home, cwd)
-
-	var items []list.Item
-	add := func(path, kind string) {
-		if path == "" {
-			return
+// setupPicker turns the picker options into a fake scan tree so the existing
+// treemap renderer, hit-testing, and edge navigation apply verbatim. Each tile
+// is one option; Size carries its free byte count (or a du estimate for the
+// current directory) for the label line.
+func (m *Model) setupPicker() {
+	opts := pickerOptions()
+	root := &scan.Node{Name: "picker", Path: "", IsDir: true, Children: make([]*scan.Node, 0, len(opts))}
+	m.pickerDesc = make(map[*scan.Node]string, len(opts))
+	m.pickerUsed = make(map[*scan.Node]bool, len(opts))
+	for _, o := range opts {
+		n := &scan.Node{Name: o.label, Path: o.path, IsDir: true, Size: o.free}
+		m.pickerDesc[n] = o.desc
+		if o.estimate {
+			m.pickerUsed[n] = true
+			m.pickerCwd = n
 		}
-		desc := kind
-		if n := freeOn(path); n > 0 {
-			desc += " · " + formatBytes(n) + " free"
-		}
-		items = append(items, pickerItem{title: path, desc: desc, path: path})
+		root.Children = append(root.Children, n)
 	}
-
-	// Home is pre-selected: it is the most common scan target.
-	add(home, "home")
-	add(root, "root")
-	if cwd != "" && cwd != home && filepath.Clean(cwd) != root {
-		add(cwd, "current directory")
-	}
-	for _, mo := range scan.Mounts() {
-		if mo.Path == home || mo.Path == root || mo.Path == cwd {
-			continue // already offered above
-		}
-		desc := mo.Type
-		if mo.Device != "" && mo.Device != mo.Path {
-			desc = mo.Device + " (" + mo.Type + ")"
-		}
-		if mo.Free > 0 {
-			desc += " · " + formatBytes(mo.Free) + " free"
-		}
-		items = append(items, pickerItem{title: mo.Path, desc: desc, path: mo.Path})
-	}
-
-	p := list.New(items, list.NewDefaultDelegate(), pickerWidth(80), pickerHeight(24))
-	p.SetFilteringEnabled(false)
-	p.SetShowTitle(false)
-	p.SetShowStatusBar(false)
-	p.SetShowPagination(false)
-	p.SetShowHelp(false)
-	p.SetShowFilter(false)
-	p.DisableQuitKeybindings()
-	if len(items) > 0 {
-		p.Select(0)
-	}
-	return p
+	m.pickerNodes = root.Children
+	m.pickerRoot = root
+	m.tree = root
+	m.current = root
 }
 
-// pickerSize maps the current terminal size onto the picker list's frame,
-// leaving room for the title above and the hints below.
-func (m *Model) pickerSize() (w, h int) {
-	return pickerWidth(m.width), pickerHeight(m.height)
+// tileAreaSize is the equal, arbitrary area every picker tile gets so all
+// options render at a comparable size regardless of free space.
+const tileAreaSize = 1 << 30
+
+// buildPickerLayout lays every picker option out as an equal-area treemap tile
+// for the current terminal size.
+func (m *Model) buildPickerLayout() {
+	children := m.pickerNodes
+	if len(children) == 0 {
+		m.rects = nil
+		m.raster = nil
+		m.tiles = nil
+		return
+	}
+	w, h := m.treemapSize()
+	items := make([]treemap.Item, len(children))
+	for i, c := range children {
+		items[i] = treemap.Item{Name: c.Name, Size: tileAreaSize, Selectable: true}
+	}
+	m.rects = treemap.LayoutWith(items, w, h, maxRects, minTileCells)
+	m.raster = treemap.Raster(m.rects, w, h)
+	m.tiles = make([]tileStyle, len(m.rects))
+	for i := range m.rects {
+		idx := m.rects[i].Index
+		if idx < 0 {
+			m.tiles[i] = otherStyle
+			continue
+		}
+		m.tiles[i] = styleFor(children[idx].Name)
+	}
+	if m.sel >= len(m.rects) {
+		m.sel = -1
+	}
+	if m.sel < 0 {
+		m.sel = firstSelectable(m.rects)
+	}
 }
 
-func pickerWidth(w int) int {
-	if w < 1 {
-		w = 80
-	}
-	if w-4 < 10 {
-		return 10
-	}
-	return w - 4
+// selectedPickerNode returns the scan target behind the current tile, or nil
+// when the selection is out of range.
+func (m *Model) selectedPickerNode() *scan.Node {
+	return m.selectedNode()
 }
 
-func pickerHeight(h int) int {
-	if h < 1 {
-		h = 24
+// tileMetric is the secondary label drawn under a tile's name: free bytes for
+// filesystems, a "~" rough du estimate for the current directory.
+func (m *Model) tileMetric(node *scan.Node) string {
+	s := formatBytes(node.Size)
+	if node.Size > 0 && m.pickerUsed[node] {
+		return "~" + s
 	}
-	if h-6 < 2 {
-		return 2
-	}
-	return h - 6
+	return s
 }
 
 // Run starts the TUI in the alt-screen and blocks until it exits.
@@ -324,9 +363,24 @@ func runSafe(op string, fn func() tea.Msg) (out tea.Msg) {
 
 func (m *Model) Init() tea.Cmd {
 	if m.mode == modePicker {
-		return nil // the picker needs no startup commands
+		return m.cwdSizeCmd()
 	}
 	return tea.Batch(m.spinner.Tick, m.startScan(0), m.progressCmd())
+}
+
+// cwdSizeCmd runs the rough du estimate for the current-directory tile in the
+// background (the picker never blocks on it); the estimate replaces the free
+// byte count when it arrives.
+func (m *Model) cwdSizeCmd() tea.Cmd {
+	if m.pickerCwd == nil {
+		return nil
+	}
+	path := m.pickerCwd.Path
+	return func() tea.Msg {
+		return runSafe("du "+path, func() tea.Msg {
+			return cwdSizeMsg{size: duSize(path)}
+		})
+	}
 }
 
 // startScan runs a fresh measure pass of the root and reports its result. The
@@ -405,6 +459,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		if m.mode == modePicker {
+			return m.updatePickerMouse(msg)
+		}
 		return m.updateMouse(msg)
 
 	case tea.KeyMsg:
@@ -438,6 +495,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = msg.node
 		m.mode = modeBrowse
 		m.buildLayout()
+		return m, nil
+
+	case cwdSizeMsg:
+		if m.pickerCwd != nil && msg.size > 0 {
+			m.pickerCwd.Size = msg.size
+			m.pickerUsed[m.pickerCwd] = true
+			m.buildPickerLayout()
+		}
 		return m, nil
 
 	case openDoneMsg:
@@ -507,24 +572,59 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updatePicker handles the filesystem picker: enter starts the scan of the
-// highlighted entry, q/esc/ctrl+c quits, and everything else (arrows, j/k,
-// pgup/pgdn, mouse) is delegated to the list component.
+// updatePicker handles the blocky filesystem picker. The tiles are navigated
+// with the same arrow/vim edge movement as the treemap browser; enter (or a
+// double-click) starts the scan of the highlighted target, q/esc/ctrl+c quits.
 func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case isQuit(msg), msg.Type == tea.KeyEsc:
 		return m.quit()
 	case msg.Type == tea.KeyEnter:
-		item := m.picker.SelectedItem()
-		if item == nil {
+		return m.choosePicker()
+	case msg.Type == tea.KeyUp, msg.String() == "k":
+		m.moveSel(0, -1)
+	case msg.Type == tea.KeyDown, msg.String() == "j":
+		m.moveSel(0, 1)
+	case msg.Type == tea.KeyLeft, msg.String() == "h":
+		m.moveSel(-1, 0)
+	case msg.Type == tea.KeyRight, msg.String() == "l":
+		m.moveSel(1, 0)
+	}
+	return m, nil
+}
+
+// updatePickerMouse selects a picker tile on click; a same-tile double-click
+// within the debounce window starts the scan. The wheel moves the selection.
+func (m *Model) updatePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		tile := m.cellAt(msg.X, msg.Y)
+		if tile < 0 || tile >= len(m.rects) || m.rects[tile].Index < 0 {
 			return m, nil
 		}
-		return m.beginScan(item.(pickerItem).path)
-	default:
-		var cmd tea.Cmd
-		m.picker, cmd = m.picker.Update(msg)
-		return m, cmd
+		now := time.Now()
+		double := tile == m.lastClickTile && now.Sub(m.lastClick) < 350*time.Millisecond
+		m.lastClickTile = tile
+		m.lastClick = now
+		m.sel = tile
+		if double {
+			return m.choosePicker()
+		}
+	case msg.Button == tea.MouseButtonWheelUp:
+		m.moveSel(0, -1)
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.moveSel(0, 1)
 	}
+	return m, nil
+}
+
+// choosePicker starts the scan of the selected picker tile.
+func (m *Model) choosePicker() (tea.Model, tea.Cmd) {
+	n := m.selectedPickerNode()
+	if n == nil {
+		return m, nil
+	}
+	return m.beginScan(n.Path)
 }
 
 // beginScan points the model at path and starts measuring it, transitioning

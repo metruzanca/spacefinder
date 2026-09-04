@@ -26,7 +26,9 @@ locate bottlenecks and, if desired, delete them.
   filesystem worth scanning (physical partitions, secondary drives, removable
   media, and network mounts — pseudo/virtual filesystems like `proc`, `tmpfs`,
   or `overlay` are filtered out, and bind mounts of an already-listed device
-  are collapsed into it). Each entry shows its free space.
+  are collapsed into it). Drives show their free space; the current directory
+  shows a rough top-level `du` estimate (run in the background so the picker
+  never blocks on it).
 - `enter` on the picker starts scanning the highlighted path; `q`, `esc`, or
   `Ctrl+C` quits.
 - With a `path` argument, the scan starts there directly, exactly as before.

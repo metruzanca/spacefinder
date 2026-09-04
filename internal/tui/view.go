@@ -178,7 +178,7 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 		drawLabel(buf, b, name)
 		if b.y1-b.y0 >= 5 {
 			mid := b.y0 + (b.y1-b.y0)/2
-			drawLabelAt(buf, b, mid+1, formatBytes(node.Size))
+			drawLabelAt(buf, b, mid+1, m.tileMetric(node))
 		}
 	}
 	return idxBuf, buf
@@ -534,16 +534,92 @@ func (m *Model) errorView() string {
 	return strings.Join(centerRows(m.height, []string{box}), "\n")
 }
 
-// pickerView renders the filesystem picker: a title, the list of scan targets
-// (sized to the terminal), and a hint line. It replaces the treemap until a
-// path is chosen.
+// pickerView renders the filesystem picker as a treemap: one equal-area tile
+// per scan target, labeled with its free space, navigated and selected like
+// the browser. Replaces the treemap until a path is chosen.
 func (m *Model) pickerView() string {
-	m.picker.SetSize(m.pickerSize())
-	body := []string{
-		accent().Render("Where should we look?"),
-		"",
+	if m.width < minWidth || m.height < minHeight {
+		return strings.Join(centerRows(m.height, []string{
+			lipgloss.NewStyle().Bold(true).Render("terminal too small"),
+			"spacefinder needs at least 20x10 cells",
+		}), "\n")
 	}
-	body = append(body, strings.Split(strings.TrimRight(m.picker.View(), "\n"), "\n")...)
-	body = append(body, "", lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("↑/↓ or j/k to choose · enter to scan · q to quit"))
-	return strings.Join(centerRows(m.height, body), "\n")
+
+	w, h := m.treemapSize()
+	m.buildPickerLayout()
+	var idxBuf [][]int
+	var buf [][]rune
+	if w > 0 && h > 0 {
+		idxBuf, buf = m.frame(w, h)
+	}
+
+	rows := []string{m.pickerHeader()}
+	switch {
+	case len(m.rects) == 0:
+		rows = append(rows, centerRows(h, []string{
+			lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("no scan targets found"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("press q to quit"),
+		})...)
+	default:
+		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
+	}
+	rows = append(rows, m.pickerStatusLine())
+	return strings.Join(rows, "\n")
+}
+
+// pickerHeader is the title row above the picker tiles.
+func (m *Model) pickerHeader() string {
+	return "⌂ " + accent().Render("pick a location to scan")
+}
+
+// pickerStatusLine mirrors the browser's status line: the selected target's
+// path and free space on the left, movement hints on the right.
+func (m *Model) pickerStatusLine() string {
+	max := m.width
+	if max < 1 {
+		max = 1
+	}
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
+	hint := "↑↓←→ / hjkl · enter or 2x=scan · q=quit"
+
+	var left string
+	if n := m.selectedPickerNode(); n != nil {
+		left = fmt.Sprintf(" ▸ %s", n.Path)
+		if n.Size > 0 {
+			if m.pickerUsed[n] {
+				left += fmt.Sprintf(" [~%s rough]", formatBytes(n.Size))
+			} else {
+				left += fmt.Sprintf(" [%s free]", formatBytes(n.Size))
+			}
+		}
+		if d := m.pickerDesc[n]; d != "" {
+			left += " · " + d
+		}
+	}
+	left = truncate(left, max)
+	if left == "" {
+		return dim.Render(hint)
+	}
+
+	const gap = 1
+	fill := max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
+	if fill < 1 {
+		avail := max - lipgloss.Width(left) - gap
+		if avail < 1 {
+			avail = 1
+		}
+		hint = truncate(hint, avail)
+		fill = max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
+		if fill < 0 {
+			fill = 0
+		}
+	}
+	out := left
+	if fill > 0 {
+		out += " " + dim.Render(strings.Repeat("·", fill)) + " "
+	} else {
+		out += " "
+	}
+	out += dim.Render(hint)
+	return out
 }
