@@ -54,6 +54,8 @@ func (m *Model) view() string {
 		return m.measuringView()
 	case modeError:
 		return m.errorView()
+	case modePicker:
+		return m.pickerView()
 	}
 
 	if m.width < minWidth || m.height < minHeight {
@@ -530,4 +532,18 @@ func (m *Model) errorView() string {
 		Width(50).
 		Render("spacefinder: " + m.errMessage + "\n\nPress q to quit.")
 	return strings.Join(centerRows(m.height, []string{box}), "\n")
+}
+
+// pickerView renders the filesystem picker: a title, the list of scan targets
+// (sized to the terminal), and a hint line. It replaces the treemap until a
+// path is chosen.
+func (m *Model) pickerView() string {
+	m.picker.SetSize(m.pickerSize())
+	body := []string{
+		accent().Render("Where should we look?"),
+		"",
+	}
+	body = append(body, strings.Split(strings.TrimRight(m.picker.View(), "\n"), "\n")...)
+	body = append(body, "", lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("↑/↓ or j/k to choose · enter to scan · q to quit"))
+	return strings.Join(centerRows(m.height, body), "\n")
 }

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -21,16 +20,22 @@ Navigate with the arrow or vim keys, drill into directories with Enter,
 double-click a file to open it in its default app, and delete junk (after
 typing its name to confirm) with Delete.
 
-Without a path, the scan starts at $HOME, or at / when run as root.`,
+Without a path, a picker lets you choose a filesystem or directory to scan:
+home, root, the current directory, and any other detected drives or
+partitions.`,
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	Version:      Version,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root := defaultRoot()
+		root := ""
 		if len(args) == 1 {
 			root = args[0]
 		}
-		logging.Debugf("tui root path: %s", root)
+		if root == "" {
+			logging.Debugf("no path given; showing filesystem picker")
+		} else {
+			logging.Debugf("tui root path: %s", root)
+		}
 		return tui.Run(root)
 	},
 }
@@ -39,18 +44,4 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
-}
-
-// defaultRoot picks the scan root: / when spacefinder is run as root, $HOME
-// otherwise.
-func defaultRoot() string {
-	if os.Geteuid() == 0 {
-		return string(os.PathSeparator)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		logging.Errorf("resolving $HOME: %v", err)
-		return filepath.VolumeName(home) + string(os.PathSeparator)
-	}
-	return home
 }

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +39,7 @@ const (
 	modeBrowse
 	modeConfirm
 	modeError
+	modePicker
 )
 
 type scanDoneMsg struct {
@@ -108,19 +110,24 @@ type Model struct {
 	confirmNode *scan.Node
 	input       textinput.Model
 	confirmErr  bool
+
+	// filesystem picker (modePicker, shown when spacefinder runs without a path)
+	picker list.Model
 }
 
 func newModel(rootPath string) *Model {
-	abs, err := filepath.Abs(rootPath)
-	if err != nil {
-		abs = rootPath
+	abs := ""
+	if rootPath != "" {
+		if a, err := filepath.Abs(rootPath); err == nil {
+			abs = a
+		}
 	}
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(accent()))
 	input := textinput.New()
 	input.Placeholder = "type the exact name"
 	input.CharLimit = 256
 	input.Width = 36
-	return &Model{
+	m := &Model{
 		rootPath:   filepath.Clean(abs),
 		mode:       modeSplash,
 		start:      time.Now(),
@@ -131,6 +138,120 @@ func newModel(rootPath string) *Model {
 		height:     24,
 		progressCh: make(chan scan.Progress, 128),
 	}
+	if rootPath == "" {
+		m.rootPath = ""
+		m.mode = modePicker
+		m.picker = newPicker()
+	}
+	return m
+}
+
+// pickerItem is one entry in the filesystem picker: the friendly row shows the
+// path to scan with a description naming the kind of entry and its free space.
+type pickerItem struct {
+	title, desc, path string
+}
+
+func (i pickerItem) Title() string       { return i.title }
+func (i pickerItem) Description() string { return i.desc }
+func (i pickerItem) FilterValue() string { return i.title + " " + i.path }
+
+// fsRoot is the "root" entry of the picker: / on unix, the volume containing
+// home (then cwd) on windows, where a lone backslash is not a real root.
+func fsRoot(home, cwd string) string {
+	if home != "" {
+		if v := filepath.VolumeName(home); v != "" {
+			return v + string(os.PathSeparator)
+		}
+	}
+	if cwd != "" {
+		if v := filepath.VolumeName(cwd); v != "" {
+			return v + string(os.PathSeparator)
+		}
+	}
+	return string(os.PathSeparator)
+}
+
+// newPicker builds the picker list: home (pre-selected), the filesystem root,
+// the current directory, then every detected mount worth scanning.
+func newPicker() list.Model {
+	home, _ := os.UserHomeDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	root := fsRoot(home, cwd)
+
+	var items []list.Item
+	add := func(path, kind string) {
+		if path == "" {
+			return
+		}
+		desc := kind
+		if n := freeOn(path); n > 0 {
+			desc += " · " + formatBytes(n) + " free"
+		}
+		items = append(items, pickerItem{title: path, desc: desc, path: path})
+	}
+
+	// Home is pre-selected: it is the most common scan target.
+	add(home, "home")
+	add(root, "root")
+	if cwd != "" && cwd != home && filepath.Clean(cwd) != root {
+		add(cwd, "current directory")
+	}
+	for _, mo := range scan.Mounts() {
+		if mo.Path == home || mo.Path == root || mo.Path == cwd {
+			continue // already offered above
+		}
+		desc := mo.Type
+		if mo.Device != "" && mo.Device != mo.Path {
+			desc = mo.Device + " (" + mo.Type + ")"
+		}
+		if mo.Free > 0 {
+			desc += " · " + formatBytes(mo.Free) + " free"
+		}
+		items = append(items, pickerItem{title: mo.Path, desc: desc, path: mo.Path})
+	}
+
+	p := list.New(items, list.NewDefaultDelegate(), pickerWidth(80), pickerHeight(24))
+	p.SetFilteringEnabled(false)
+	p.SetShowTitle(false)
+	p.SetShowStatusBar(false)
+	p.SetShowPagination(false)
+	p.SetShowHelp(false)
+	p.SetShowFilter(false)
+	p.DisableQuitKeybindings()
+	if len(items) > 0 {
+		p.Select(0)
+	}
+	return p
+}
+
+// pickerSize maps the current terminal size onto the picker list's frame,
+// leaving room for the title above and the hints below.
+func (m *Model) pickerSize() (w, h int) {
+	return pickerWidth(m.width), pickerHeight(m.height)
+}
+
+func pickerWidth(w int) int {
+	if w < 1 {
+		w = 80
+	}
+	if w-4 < 10 {
+		return 10
+	}
+	return w - 4
+}
+
+func pickerHeight(h int) int {
+	if h < 1 {
+		h = 24
+	}
+	if h-6 < 2 {
+		return 2
+	}
+	return h - 6
 }
 
 // Run starts the TUI in the alt-screen and blocks until it exits.
@@ -202,6 +323,9 @@ func runSafe(op string, fn func() tea.Msg) (out tea.Msg) {
 }
 
 func (m *Model) Init() tea.Cmd {
+	if m.mode == modePicker {
+		return nil // the picker needs no startup commands
+	}
 	return tea.Batch(m.spinner.Tick, m.startScan(0), m.progressCmd())
 }
 
@@ -364,6 +488,8 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if isQuit(msg) {
 			return m.quit()
 		}
+	case modePicker:
+		return m.updatePicker(msg)
 	case modeMeasuring:
 		switch {
 		case isQuit(msg):
@@ -379,6 +505,45 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateBrowse(msg)
 	}
 	return m, nil
+}
+
+// updatePicker handles the filesystem picker: enter starts the scan of the
+// highlighted entry, q/esc/ctrl+c quits, and everything else (arrows, j/k,
+// pgup/pgdn, mouse) is delegated to the list component.
+func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case isQuit(msg), msg.Type == tea.KeyEsc:
+		return m.quit()
+	case msg.Type == tea.KeyEnter:
+		item := m.picker.SelectedItem()
+		if item == nil {
+			return m, nil
+		}
+		return m.beginScan(item.(pickerItem).path)
+	default:
+		var cmd tea.Cmd
+		m.picker, cmd = m.picker.Update(msg)
+		return m, cmd
+	}
+}
+
+// beginScan points the model at path and starts measuring it, transitioning
+// through the splash screen. Used by the picker after a selection.
+func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
+	m.rootPath = path
+	m.scanGen = 0
+	m.progress = scan.Progress{}
+	m.progressCh = make(chan scan.Progress, 128)
+	m.scanner = nil
+	m.tree = nil
+	m.current = nil
+	m.crumbs = nil
+	m.pending = nil
+	m.freeBytes = 0
+	m.mode = modeSplash
+	m.start = time.Now()
+	logging.Debugf("tui root path: %s", path)
+	return m, tea.Batch(m.spinner.Tick, m.startScan(0), m.progressCmd())
 }
 
 func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

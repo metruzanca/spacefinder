@@ -20,8 +20,18 @@ locate bottlenecks and, if desired, delete them.
 
 ## Root of the Scan
 
-- When run as a normal user, the scan root defaults to `$HOME`.
-- When run with `sudo spacefinder`, the scan root defaults to `/`.
+- Without a `path` argument, spacefinder opens a **picker** listing scan
+  targets: the user's home directory (pre-selected), the filesystem root `/`,
+  the directory spacefinder was launched from, and every other mounted
+  filesystem worth scanning (physical partitions, secondary drives, removable
+  media, and network mounts — pseudo/virtual filesystems like `proc`, `tmpfs`,
+  or `overlay` are filtered out, and bind mounts of an already-listed device
+  are collapsed into it). Each entry shows its free space.
+- `enter` on the picker starts scanning the highlighted path; `q`, `esc`, or
+  `Ctrl+C` quits.
+- With a `path` argument, the scan starts there directly, exactly as before.
+- Mount detection reads `/proc/mounts` on Linux, `getfsstat` on macOS, and the
+  drive-letter bitmap on Windows.
 
 ## Navigation
 
