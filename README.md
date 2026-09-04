@@ -16,13 +16,21 @@ never be deleted through the UI.
 
 ## Install
 
+One installer script works on both platforms:
+
 ```bash
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/metruzanca/spacefinder/main/install.sh | sh
 ```
 
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/metruzanca/spacefinder/main/install.sh | iex
+```
+
 Downloads the latest release binary for your OS/arch, verifies its checksum, and
-installs it to `~/.local/bin` (override with `PREFIX` or `BINDIR`). Or build from
-source:
+installs it to `~/.local/bin` (macOS/Linux, override with `PREFIX` or `BINDIR`)
+or `%LOCALAPPDATA%\spacefinder\bin` (Windows). Or build from source:
 
 ```bash
 go install github.com/metruzanca/spacefinder@latest
