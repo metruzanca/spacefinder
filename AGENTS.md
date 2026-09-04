@@ -2,6 +2,8 @@
 
 Go CLI application built with [Cobra](https://github.com/spf13/cobra). Used as a starting template for new CLI projects.
 
+For detailed context on what this application does, see [docs/spec.md](docs/spec.md).
+
 ## Structure
 
 - `main.go` — thin entrypoint; loads godotenv, inits debug logging, calls `cmd.Execute()`
