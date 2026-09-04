@@ -16,16 +16,16 @@ never be deleted through the UI.
 
 ## Install
 
-One installer script works on both platforms:
+One installer per platform:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/metruzanca/spacefinder/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/metruzanca/spacefinder/main/.github/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/metruzanca/spacefinder/main/install.sh | iex
+irm https://raw.githubusercontent.com/metruzanca/spacefinder/main/.github/install.ps1 | iex
 ```
 
 Downloads the latest release binary for your OS/arch, verifies its checksum, and
