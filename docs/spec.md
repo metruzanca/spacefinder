@@ -29,8 +29,9 @@ locate bottlenecks and, if desired, delete them.
   are collapsed into it). Drives show their free space; the current directory
   shows a rough top-level `du` estimate (run in the background so the picker
   never blocks on it).
-- `enter` on the picker starts scanning the highlighted path; `q`, `esc`, or
-  `Ctrl+C` quits.
+- `enter` on the picker starts scanning the highlighted path; `q` or `Ctrl+C`
+  quits (`esc` does nothing on this first screen, so it can never accidentally
+  dismiss the picker).
 - With a `path` argument, the scan starts there directly, exactly as before.
 - Mount detection reads `/proc/mounts` on Linux, `getfsstat` on macOS, and the
   drive-letter bitmap on Windows.
@@ -46,6 +47,9 @@ locate bottlenecks and, if desired, delete them.
 - `Esc` steps back up one level (and cancels a measurement still in flight).
 - `r` rescans the root from scratch.
 - `q` (or `Ctrl+C`) quits.
+- `?` opens a modal with the full keybind reference and an explanation of what
+  the mouse can do; `esc`, `enter`, or `?` closes it. The bottom bar shows the
+  core shortcuts at a glance and note that the mouse is supported.
 - Breadcrumbs at the top of the screen show the current location.
 
 ## Mouse

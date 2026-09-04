@@ -95,6 +95,18 @@ func TestPickerQuitsOnQ(t *testing.T) {
 	}
 }
 
+func TestPickerEscDoesNotQuit(t *testing.T) {
+	m := pickerModel()
+	got, cmd := m.Update(keyType(tea.KeyEsc))
+	mm := got.(*Model)
+	if mm.mode != modePicker {
+		t.Fatalf("esc left the picker: mode = %v", mm.mode)
+	}
+	if cmd != nil {
+		t.Fatal("esc started a command on the picker")
+	}
+}
+
 func TestPickerQuitsOnCtrlC(t *testing.T) {
 	var out bytes.Buffer
 	p := tea.NewProgram(pickerModel(),
@@ -119,7 +131,7 @@ func TestPickerViewRenders(t *testing.T) {
 	if !strings.Contains(v, "home") {
 		t.Fatalf("picker tiles missing; got:\n%s", v)
 	}
-	if !strings.Contains(v, "enter / 2×") {
+	if !strings.Contains(v, "mouse supported") {
 		t.Fatal("picker hint missing")
 	}
 }

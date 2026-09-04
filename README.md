@@ -40,7 +40,7 @@ detected drive or partition. Drives show their free space; the current
 directory shows a rough `du` estimate of its size. `enter` starts the scan,
 `q` quits. With a `path`, the scan starts there directly.
 
-Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in (or to open a file in its OS default application). `del` to delete (with confirmation) and `q` to quit.
+Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in (or to open a file in its OS default application). `del` to delete (with confirmation), `q` to quit, and `?` to open a full keybind + mouse reference. The bottom bar shows the core shortcuts and notes that the mouse is supported.
 
 ## TODO
 

@@ -39,6 +39,7 @@ const (
 	modeConfirm
 	modeError
 	modePicker
+	modeHelp
 )
 
 type scanDoneMsg struct {
@@ -123,6 +124,9 @@ type Model struct {
 	pickerUsed  map[*scan.Node]bool   // nodes whose Size is an estimate, not free bytes
 	pickerCwd   *scan.Node            // the current-directory tile (rough du size)
 	pickerRoot  *scan.Node            // fake root so the treemap renderer is reused
+
+	// help modal (modeHelp): which mode to return to on close
+	helpFrom mode
 }
 
 func newModel(rootPath string) *Model {
@@ -459,7 +463,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		if m.mode == modePicker {
+		switch m.mode {
+		case modeHelp:
+			return m, nil // the modal swallows mouse input
+		case modePicker:
 			return m.updatePickerMouse(msg)
 		}
 		return m.updateMouse(msg)
@@ -555,6 +562,8 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case modePicker:
 		return m.updatePicker(msg)
+	case modeHelp:
+		return m.updateHelp(msg)
 	case modeMeasuring:
 		switch {
 		case isQuit(msg):
@@ -577,10 +586,12 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // double-click) starts the scan of the highlighted target, q/esc/ctrl+c quits.
 func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case isQuit(msg), msg.Type == tea.KeyEsc:
-		return m.quit()
 	case msg.Type == tea.KeyEnter:
 		return m.choosePicker()
+	case msg.String() == "?":
+		return m.openHelp(), nil
+	case isQuit(msg): // esc intentionally does not quit from the picker
+		return m.quit()
 	case msg.Type == tea.KeyUp, msg.String() == "k":
 		m.moveSel(0, -1)
 	case msg.Type == tea.KeyDown, msg.String() == "j":
@@ -627,6 +638,31 @@ func (m *Model) choosePicker() (tea.Model, tea.Cmd) {
 	return m.beginScan(n.Path)
 }
 
+// openHelp overlays the keybind/mouse help modal on the current screen. It may
+// only be entered from the treemap browser or the picker.
+func (m *Model) openHelp() *Model {
+	if m.mode != modeBrowse && m.mode != modePicker {
+		return m
+	}
+	m.helpFrom = m.mode
+	m.mode = modeHelp
+	return m
+}
+
+// updateHelp handles keys while the help modal is open: esc, enter, or another
+// "?" closes it back to the mode it came from; q (or ctrl+c) quits.
+func (m *Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc, msg.Type == tea.KeyEnter, msg.String() == "?":
+		m.mode = m.helpFrom
+		m.helpFrom = 0
+		return m, nil
+	case isQuit(msg):
+		return m.quit()
+	}
+	return m, nil
+}
+
 // beginScan points the model at path and starts measuring it, transitioning
 // through the splash screen. Used by the picker after a selection.
 func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
@@ -653,6 +689,8 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyBackspace:
 		m.openConfirm()
 		return m, nil
+	case msg.String() == "?":
+		return m.openHelp(), nil
 	case msg.Type == tea.KeyEnter:
 		return m, m.drill()
 	case msg.String() == "r":

@@ -18,6 +18,7 @@ const (
 	idxModalBG  = -2 // modal backdrop
 	idxModalFG  = -3 // modal text
 	idxModalErr = -4
+	idxModalDim = -5 // dim description text in the help table
 )
 
 type rBounds struct{ x0, y0, x1, y1 int }
@@ -57,6 +58,11 @@ func (m *Model) view() string {
 	case modePicker:
 		return m.pickerView()
 	}
+	// The help modal overlays the screen it came from, so a help opened from
+	// the picker must render the picker (tiles, info, keybind bar) behind it.
+	if m.mode == modeHelp && m.helpFrom == modePicker {
+		return m.pickerView()
+	}
 
 	if m.width < minWidth || m.height < minHeight {
 		return strings.Join(centerRows(m.height, []string{
@@ -70,14 +76,17 @@ func (m *Model) view() string {
 	var buf [][]rune
 	if w > 0 && h > 0 {
 		idxBuf, buf = m.frame(w, h)
-		if m.mode == modeConfirm {
+		switch {
+		case m.mode == modeConfirm:
 			m.drawModal(idxBuf, buf, w, h)
+		case m.mode == modeHelp:
+			m.drawHelp(idxBuf, buf, w, h)
 		}
 	}
 
 	rows := []string{m.breadcrumbLine(), m.infoLine()}
 	switch {
-	case m.mode == modeConfirm:
+	case m.mode == modeConfirm, m.mode == modeHelp:
 		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
 	case len(m.rects) == 0:
 		rows = append(rows, centerRows(h, []string{
@@ -220,10 +229,147 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 	} else {
 		text = append(text, m.input.Value())
 	}
+	errLine := -1
 	if m.confirmErr {
 		text = append(text, "Name does not match.")
+		errLine = len(text) - 1
+	}
+	paintModal(idxBuf, buf, w, h, text, errLine)
+}
+
+// drawHelp paints the keybind/mouse reference as a borderless, scrim-backed
+// table over the current frame.
+func (m *Model) drawHelp(idxBuf [][]int, buf [][]rune, w, h int) {
+	paintTable(idxBuf, buf, w, h, m.helpRows())
+}
+
+// helpTableRow is one row of the help table: a key cell and a description
+// cell. header rows are section titles; footer rows are a single centered
+// hint line.
+type helpTableRow struct {
+	left, right string
+	header      bool
+	footer      bool
+}
+
+// helpRows returns the single, global keybind reference shown by the help
+// modal wherever it is opened from: the full set of controls plus a mouse
+// primer, laid out as a two-column table.
+func (m *Model) helpRows() []helpTableRow {
+	kb := []helpTableRow{
+		{left: "↑↓←→ / hjkl", right: "move the selection"},
+		{left: "enter", right: "drill into a folder"},
+		{left: "esc", right: "go up a level"},
+		{left: "r", right: "rescan the current root"},
+		{left: "del", right: "delete the selection (type its name to confirm)"},
+		{left: "q", right: "quit"},
 	}
 
+	rows := []helpTableRow{{left: "KEYBINDS", header: true}}
+	rows = append(rows, kb...)
+	rows = append(rows, helpTableRow{}) // breathing room
+	rows = append(rows, helpTableRow{left: "MOUSE", header: true})
+	rows = append(rows,
+		helpTableRow{left: "click", right: "select a block"},
+		helpTableRow{left: "double-click", right: "drill into a folder / open a file"},
+		helpTableRow{left: "right-click", right: "go up a level"},
+		helpTableRow{left: "wheel", right: "move the selection"},
+	)
+	return append(rows,
+		helpTableRow{},
+		helpTableRow{right: "esc, enter, or ? to close", footer: true},
+	)
+}
+
+// paintTable draws a borderless two-column table on a scrim backdrop: the key
+// cell is left-aligned in its own column, the description sits in the column
+// beside it, section headers and the footer span the width.
+func paintTable(idxBuf [][]int, buf [][]rune, w, h int, rows []helpTableRow) {
+	leftW, rightW := 0, 0
+	for _, r := range rows {
+		if r.header || r.footer {
+			continue
+		}
+		if n := lipgloss.Width(r.left); n > leftW {
+			leftW = n
+		}
+		if n := lipgloss.Width(r.right); n > rightW {
+			rightW = n
+		}
+	}
+	const gap = 4
+	const pad = 2
+	bodyW := leftW + gap + rightW
+	for _, r := range rows {
+		var wl int
+		switch {
+		case r.footer:
+			wl = lipgloss.Width(r.right)
+		case r.header:
+			wl = lipgloss.Width(r.left)
+		}
+		if wl > bodyW {
+			bodyW = wl
+		}
+	}
+	boxW := bodyW + 2*pad
+	if boxW > w {
+		boxW = w
+	}
+	boxH := len(rows) + 2
+	if boxH > h {
+		boxH = h
+	}
+	ox := (w - boxW) / 2
+	oy := (h - boxH) / 2
+	if ox < 0 {
+		ox = 0
+	}
+	if oy < 0 {
+		oy = 0
+	}
+
+	paint := func(x, y int, r rune, idx int) {
+		if x >= 0 && x < w && y >= 0 && y < h {
+			idxBuf[y][x] = idx
+			buf[y][x] = r
+		}
+	}
+	for yy := 0; yy < boxH && oy+yy < h; yy++ {
+		for xx := 0; xx < w; xx++ {
+			paint(xx, oy+yy, ' ', idxModalBG)
+		}
+	}
+	writeText := func(x, y int, txt string, idx int) {
+		for j, r := range []rune(txt) {
+			paint(x+j, y, r, idx)
+		}
+	}
+	for i, r := range rows {
+		y := oy + 1 + i
+		if y < 0 || y >= h {
+			break
+		}
+		switch {
+		case r.footer:
+			txt := truncate(r.right, boxW-2*pad)
+			writeText(ox+pad+(boxW-2*pad-lipgloss.Width(txt))/2, y, txt, idxModalDim)
+		case r.header:
+			txt := truncate(r.left, boxW-2*pad)
+			writeText(ox+pad, y, txt, idxModalFG)
+		default:
+			left := truncate(r.left, leftW)
+			right := truncate(r.right, boxW-pad-leftW-gap-pad)
+			writeText(ox+pad, y, left, idxModalFG)
+			writeText(ox+pad+leftW+gap, y, right, idxModalDim)
+		}
+	}
+}
+
+// paintModal draws a centered message box over the frame: full-width scrim so
+// neighbouring labels do not bleed in, a bordered box, and the given text rows.
+// errLine marks one row to render in the error color (-1 for none).
+func paintModal(idxBuf [][]int, buf [][]rune, w, h int, text []string, errLine int) {
 	boxW := 0
 	for _, l := range text {
 		if n := lipgloss.Width(l); n > boxW {
@@ -300,7 +446,7 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 		row := oy + 1 + i
 		start := ox + 1 + (boxW-2-len(runes))/2
 		idx := idxModalFG
-		if i == len(text)-1 && m.confirmErr {
+		if i == errLine {
 			idx = idxModalErr
 		}
 		for j, r := range runes {
@@ -347,6 +493,10 @@ func styleOf(tiles []tileStyle, idx, sel int, ch rune) lipgloss.Style {
 	switch {
 	case idx == idxModalBG:
 		return lipgloss.NewStyle().Background(lipgloss.Color("232"))
+	case idx == idxModalDim:
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("232")).
+			Foreground(lipgloss.Color(colHelpLabel))
 	case idx == idxModalFG, idx == idxModalErr:
 		s := lipgloss.NewStyle().Background(lipgloss.Color("232"))
 		if idx == idxModalErr {
@@ -417,6 +567,16 @@ func (m *Model) breadcrumbLine() string {
 	return s
 }
 
+// effectiveMode is the screen the current view belongs to: when the help modal
+// is open it is the mode it overlays, so the info and keybind rows keep the
+// flavour of the underlying view.
+func (m *Model) effectiveMode() mode {
+	if m.mode == modeHelp && m.helpFrom != 0 {
+		return m.helpFrom
+	}
+	return m.mode
+}
+
 // infoLine is a single row just below the breadcrumbs describing the current
 // selection (browse: the selected entry and its share; picker: the selected
 // target). It never carries hints — the keybinds own the bottom line.
@@ -426,7 +586,7 @@ func (m *Model) infoLine() string {
 		max = 1
 	}
 	var left string
-	switch m.mode {
+	switch m.effectiveMode() {
 	case modePicker:
 		if n := m.selectedPickerNode(); n != nil {
 			left = fmt.Sprintf(" ▸ %s", n.Path)
@@ -468,16 +628,17 @@ type keybind struct {
 func helpLineBindings(mode mode) []keybind {
 	if mode == modePicker {
 		return []keybind{
-			{"↑↓←→ / hjkl", "select"},
-			{"enter / 2×", "scan"},
-			{"q / esc", "quit"},
+			{"↑↓←→", "select"},
+			{"enter", "scan"},
+			{"?", "help"},
+			{"q", "quit"},
 		}
 	}
 	return []keybind{
 		{"click", "select"},
-		{"2×", "drill / open"},
 		{"esc", "up"},
 		{"del", "delete"},
+		{"?", "help"},
 		{"q", "quit"},
 	}
 }
@@ -504,7 +665,7 @@ func (m *Model) helpLine() string {
 		s string
 		w int
 	}
-	for i, h := range helpLineBindings(m.mode) {
+	for i, h := range helpLineBindings(m.effectiveMode()) {
 		var b strings.Builder
 		if i > 0 {
 			b.WriteString(lbl.Render(" · "))
@@ -517,6 +678,12 @@ func (m *Model) helpLine() string {
 			w int
 		}{s, lipgloss.Width(s)})
 	}
+	// Plain text (no key) announcing mouse support, styled gray like the rest.
+	note := lbl.Render(" · mouse supported")
+	segs = append(segs, struct {
+		s string
+		w int
+	}{note, lipgloss.Width(note)})
 
 	var b strings.Builder
 	var used int
@@ -623,6 +790,9 @@ func (m *Model) pickerView() string {
 	var buf [][]rune
 	if w > 0 && h > 0 {
 		idxBuf, buf = m.frame(w, h)
+		if m.mode == modeHelp {
+			m.drawHelp(idxBuf, buf, w, h)
+		}
 	}
 
 	rows := []string{m.pickerHeader(), m.infoLine()}
