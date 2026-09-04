@@ -3,7 +3,7 @@
 ![](.github/demo.png)
 
 Visualize disk usage as an interactive **treemap** in your terminal — a
-text-mode take on [spacesniffer](https://uderzo.it/main_products/space_sniffer/)
+text-mode take on [spacesniffer][1]
 and [filelight](https://apps.kde.org/filelight/).
 
 The full home dir scan runs like `du`: one fast pass up front (the splash
@@ -35,3 +35,16 @@ spacefinder [path]
 ```
 
 `path` defaults to user's home directory or root if root.
+
+Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` for zoom in/out and mouse input with double clicking to zoom in. `del` to delete(with confirmation) and `q` to quit.
+
+## TODO
+
+For v0.1.0 I choose to not render small folders/files. I'm considering adding a vertical scroll to the pages to show every folder/file no matter how small.
+
+Filters are another idea from [Spacesniffer][1] which would be useful: filter by file type, age, file size. Spacesniffer also net you tag files, which could be useful for filtering. And exporting a report could also be useful, though I've never used that feature from spacesniffer.
+
+
+<!-- References -->
+
+[1]: https://uderzo.it/main_products/space_sniffer/
