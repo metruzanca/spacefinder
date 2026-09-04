@@ -14,9 +14,24 @@ Deleting always asks you to **type the exact name** of the entry inside a modal
 dialog — accidental deletions require real intent. The scan root itself can
 never be deleted through the UI.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/metruzanca/spacefinder/main/install.sh | sh
+```
+
+Downloads the latest release binary for your OS/arch, verifies its checksum, and
+installs it to `~/.local/bin` (override with `PREFIX` or `BINDIR`). Or build from
+source:
+
+```bash
+go install github.com/metruzanca/spacefinder@latest
+```
 
 ## Usage
 
 ```
 spacefinder [path]
 ```
+
+`path` defaults to user's home directory or root if root.
