@@ -114,6 +114,10 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
   the screen.
 - **Entry cap**: at most 200 blocks are laid out per level; anything beyond
   folds into a single non-selectable "other" bucket.
+- **Info row**: a single row below the breadcrumbs describes the current
+  selection (name, size, share, child counts); the bottom line is reserved for
+  keybinds, rendered on a black bar with white keys and neutral gray
+  descriptions.
 - **Hidden children**: entries too small to earn a meaningful tile (fewer than
   4 cells) are neither rendered nor selectable, but their count is surfaced in
-  the status line.
+  the info row.

@@ -119,7 +119,7 @@ func TestPickerViewRenders(t *testing.T) {
 	if !strings.Contains(v, "home") {
 		t.Fatalf("picker tiles missing; got:\n%s", v)
 	}
-	if !strings.Contains(v, "enter or 2x=scan") {
+	if !strings.Contains(v, "enter / 2×") {
 		t.Fatal("picker hint missing")
 	}
 }
@@ -225,7 +225,7 @@ func TestPickerCwdSizeEstimate(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(mm.pickerStatusLine(), "rough") {
+	if !strings.Contains(mm.infoLine(), "rough") {
 		t.Fatal("status line does not label the estimate")
 	}
 }

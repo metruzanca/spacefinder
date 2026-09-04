@@ -914,7 +914,9 @@ func (m *Model) buildLayout() {
 }
 
 func (m *Model) treemapSize() (int, int) {
-	w, h := m.width-2, m.height-2
+	// The screen always reserves a breadcrumb row, an info row, and the bottom
+	// keybind bar; the free-space gutter eats into the remaining treemap space.
+	w, h := m.width-2, m.height-3
 	if w < 1 {
 		w = 1
 	}

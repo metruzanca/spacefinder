@@ -17,6 +17,11 @@ const (
 	colOtherBG = "#3a3f4b"
 	colOtherFG = "#9aa0aa"
 	colFreeBG  = "#2b3138" // muted backdrop for the free-space gutter
+
+	// bottom keybind bar: black background, white keys, neutral gray labels
+	colHelpBG    = "0"
+	colHelpKey   = "255"
+	colHelpLabel = "250"
 )
 
 var accentColor = lipgloss.Color(colAccent)

@@ -12,12 +12,21 @@ import (
 )
 
 func TestStatusLineFitsWidth(t *testing.T) {
-	m := browseModel()
 	for _, w := range []int{40, 80, 120} {
-		m.width = w
-		line := m.statusLine()
-		if got := lipgloss.Width(line); got > w {
-			t.Fatalf("width %d: statusLine is %d cells wide: %q", w, got, line)
+		b := browseModel()
+		b.width = w
+		p := pickerModel()
+		p.width = w
+		lines := map[string]string{
+			"infoBrowse": b.infoLine(),
+			"helpBrowse": b.helpLine(),
+			"infoPicker": p.infoLine(),
+			"helpPicker": p.helpLine(),
+		}
+		for name, line := range lines {
+			if got := lipgloss.Width(line); got > w {
+				t.Fatalf("width %d: %s is %d cells wide: %q", w, name, got, line)
+			}
 		}
 	}
 }

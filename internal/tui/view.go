@@ -75,7 +75,7 @@ func (m *Model) view() string {
 		}
 	}
 
-	rows := []string{m.breadcrumbLine()}
+	rows := []string{m.breadcrumbLine(), m.infoLine()}
 	switch {
 	case m.mode == modeConfirm:
 		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
@@ -90,7 +90,7 @@ func (m *Model) view() string {
 	if n := m.freeRows(); n > 0 {
 		rows = append(rows, m.freeGutterRows(n, m.width)...)
 	}
-	rows = append(rows, m.statusLine())
+	rows = append(rows, m.helpLine())
 	return strings.Join(rows, "\n")
 }
 
@@ -417,64 +417,136 @@ func (m *Model) breadcrumbLine() string {
 	return s
 }
 
-func (m *Model) statusLine() string {
+// infoLine is a single row just below the breadcrumbs describing the current
+// selection (browse: the selected entry and its share; picker: the selected
+// target). It never carries hints — the keybinds own the bottom line.
+func (m *Model) infoLine() string {
 	max := m.width
 	if max < 1 {
 		max = 1
 	}
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	hint := "click=sel · 2x=drill/open · esc=up · del=delete · q=quit"
-
 	var left string
-	if n := m.selectedNode(); n != nil {
-		left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
-		if m.current != nil && m.current.Size > 0 {
-			left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
+	switch m.mode {
+	case modePicker:
+		if n := m.selectedPickerNode(); n != nil {
+			left = fmt.Sprintf(" ▸ %s", n.Path)
+			if n.Size > 0 {
+				if m.pickerUsed[n] {
+					left += fmt.Sprintf(" [~%s rough]", formatBytes(n.Size))
+				} else {
+					left += fmt.Sprintf(" [%s free]", formatBytes(n.Size))
+				}
+			}
+			if d := m.pickerDesc[n]; d != "" {
+				left += " · " + d
+			}
 		}
-		if m.current != nil {
-			left += fmt.Sprintf(" · %d children", len(m.current.Children))
-			if m.hidden > 0 {
-				left += fmt.Sprintf(" · %d hidden", m.hidden)
+	default:
+		if n := m.selectedNode(); n != nil {
+			left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
+			if m.current != nil && m.current.Size > 0 {
+				left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
+			}
+			if m.current != nil {
+				left += fmt.Sprintf(" · %d children", len(m.current.Children))
+				if m.hidden > 0 {
+					left += fmt.Sprintf(" · %d hidden", m.hidden)
+				}
 			}
 		}
 	}
-	left = truncate(left, max)
-	if left == "" {
-		return dim.Render(hint)
+	return truncate(left, max)
+}
+
+// keybind is one keybord/mouse shortcut shown in the bottom help bar.
+type keybind struct {
+	key  string // the actual key(s), rendered white
+	desc string // what they do, rendered gray
+}
+
+// helpLineBindings returns the shortcuts shown for the current mode.
+func helpLineBindings(mode mode) []keybind {
+	if mode == modePicker {
+		return []keybind{
+			{"↑↓←→ / hjkl", "select"},
+			{"enter / 2×", "scan"},
+			{"q / esc", "quit"},
+		}
+	}
+	return []keybind{
+		{"click", "select"},
+		{"2×", "drill / open"},
+		{"esc", "up"},
+		{"del", "delete"},
+		{"q", "quit"},
+	}
+}
+
+// helpLine is the bottom row of the screen: keybinds on a black bar, with the
+// keys themselves in white and their descriptions in neutral gray. On narrow
+// terminals trailing bindings are dropped (with an ellipsis) so the bar always
+// fits.
+func (m *Model) helpLine() string {
+	max := m.width
+	if max < 1 {
+		max = 1
+	}
+	key := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(colHelpKey)).
+		Background(lipgloss.Color(colHelpBG)).
+		Bold(true)
+	lbl := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(colHelpLabel)).
+		Background(lipgloss.Color(colHelpBG))
+	fill := lipgloss.NewStyle().Background(lipgloss.Color(colHelpBG))
+
+	var segs []struct {
+		s string
+		w int
+	}
+	for i, h := range helpLineBindings(m.mode) {
+		var b strings.Builder
+		if i > 0 {
+			b.WriteString(lbl.Render(" · "))
+		}
+		b.WriteString(key.Render(h.key))
+		b.WriteString(lbl.Render("  " + h.desc))
+		s := b.String()
+		segs = append(segs, struct {
+			s string
+			w int
+		}{s, lipgloss.Width(s)})
 	}
 
-	const gap = 1
-	fill := max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
-	if fill < 1 {
-		avail := max - lipgloss.Width(left) - gap
-		if avail < 1 {
-			avail = 1
+	var b strings.Builder
+	var used int
+	var overflow bool
+	for _, sg := range segs {
+		if used+sg.w > max {
+			overflow = true
+			break
 		}
-		hint = truncate(hint, avail)
-		fill = max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
-		if fill < 0 {
-			fill = 0
-		}
+		used += sg.w
+		b.WriteString(sg.s)
 	}
-	out := left
-	if fill > 0 {
-		out += " " + dim.Render(strings.Repeat("·", fill)) + " "
-	} else {
-		out += " "
+	if overflow && used+lipgloss.Width("…") <= max {
+		b.WriteString(lbl.Render("…"))
 	}
-	out += dim.Render(hint)
-	return out
+	row := b.String()
+	pad := max - lipgloss.Width(row)
+	left := pad / 2
+	return fill.Render(strings.Repeat(" ", left)) + row + fill.Render(strings.Repeat(" ", pad-left))
 }
 
 // cellAt maps terminal (0-based) coordinates to the rectangle under the
 // cursor, or -1 when the point is outside the treemap. The treemap body starts
-// on the line below the breadcrumb, so the y offset is adjusted by one.
+// on the line below the breadcrumbs and info row, so the y offset is two.
 func (m *Model) cellAt(x, y int) int {
 	w, h := m.treemapSize()
 	if len(m.raster) != w*h || w <= 0 || h <= 0 {
 		return -1
 	}
-	ty := y - 1
+	ty := y - 2
 	if ty < 0 || ty >= h || x < 0 || x >= w {
 		return -1
 	}
@@ -553,7 +625,7 @@ func (m *Model) pickerView() string {
 		idxBuf, buf = m.frame(w, h)
 	}
 
-	rows := []string{m.pickerHeader()}
+	rows := []string{m.pickerHeader(), m.infoLine()}
 	switch {
 	case len(m.rects) == 0:
 		rows = append(rows, centerRows(h, []string{
@@ -563,63 +635,11 @@ func (m *Model) pickerView() string {
 	default:
 		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
 	}
-	rows = append(rows, m.pickerStatusLine())
+	rows = append(rows, m.helpLine())
 	return strings.Join(rows, "\n")
 }
 
 // pickerHeader is the title row above the picker tiles.
 func (m *Model) pickerHeader() string {
 	return "⌂ " + accent().Render("pick a location to scan")
-}
-
-// pickerStatusLine mirrors the browser's status line: the selected target's
-// path and free space on the left, movement hints on the right.
-func (m *Model) pickerStatusLine() string {
-	max := m.width
-	if max < 1 {
-		max = 1
-	}
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	hint := "↑↓←→ / hjkl · enter or 2x=scan · q=quit"
-
-	var left string
-	if n := m.selectedPickerNode(); n != nil {
-		left = fmt.Sprintf(" ▸ %s", n.Path)
-		if n.Size > 0 {
-			if m.pickerUsed[n] {
-				left += fmt.Sprintf(" [~%s rough]", formatBytes(n.Size))
-			} else {
-				left += fmt.Sprintf(" [%s free]", formatBytes(n.Size))
-			}
-		}
-		if d := m.pickerDesc[n]; d != "" {
-			left += " · " + d
-		}
-	}
-	left = truncate(left, max)
-	if left == "" {
-		return dim.Render(hint)
-	}
-
-	const gap = 1
-	fill := max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
-	if fill < 1 {
-		avail := max - lipgloss.Width(left) - gap
-		if avail < 1 {
-			avail = 1
-		}
-		hint = truncate(hint, avail)
-		fill = max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
-		if fill < 0 {
-			fill = 0
-		}
-	}
-	out := left
-	if fill > 0 {
-		out += " " + dim.Render(strings.Repeat("·", fill)) + " "
-	} else {
-		out += " "
-	}
-	out += dim.Render(hint)
-	return out
 }
