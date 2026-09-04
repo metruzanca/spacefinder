@@ -234,6 +234,61 @@ func TestExpandFallbackAfterForget(t *testing.T) {
 	}
 }
 
+func TestThrottleNilReceiver(t *testing.T) {
+	// totalOrMeasure drives on-demand re-measures with a nil throttle; every
+	// throttle method must tolerate that.
+	var th *throttle
+	th.report(1, 0, "/x")
+	th.report(0, 1, "/y")
+	th.flush()
+}
+
+// TestExpandReMeasuresMissingSubdir ensures Expand re-measures a directory
+// whose total is missing (e.g. it changed after the pass) without panicking.
+// This previously panicked with a nil-pointer dereference because the
+// on-demand measure ran with a nil throttle.
+func TestExpandReMeasuresMissingSubdir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "play", "sub", "z.txt"), "z")
+	sc, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var play *Node
+	for _, c := range tree.Children {
+		if c.Name == "play" {
+			play = c
+		}
+	}
+	if play == nil {
+		t.Fatal("play not in children")
+	}
+
+	// The directory and its subdir are now stale: forget both totals, add
+	// content, and expand. The subdir must be re-measured on the spot.
+	sc.Forget(play.Path)
+	sc.Forget(filepath.Join(play.Path, "sub"))
+	writeFile(t, filepath.Join(play.Path, "sub", "w.txt"), "w")
+	if err := sc.Expand(context.Background(), play); err != nil {
+		t.Fatal(err)
+	}
+	if len(play.Children) != 1 || play.Children[0].Name != "sub" {
+		t.Fatalf("children = %#v, want [sub]", play.Children)
+	}
+	sub := play.Children[0]
+	want := fileBlocks(t, filepath.Join(sub.Path, "z.txt")) + fileBlocks(t, filepath.Join(sub.Path, "w.txt"))
+	if sub.Size != want {
+		t.Fatalf("sub.Size = %d, want %d (re-measured on the spot)", sub.Size, want)
+	}
+	// sub stays thin until expanded; its recorded total was refreshed.
+	if err := sc.Expand(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.Children) != 2 {
+		t.Fatalf("sub children = %d, want 2", len(sub.Children))
+	}
+}
+
 func TestMeasureIgnoresMountLikeDirs(t *testing.T) {
 	// A directory whose st_dev differs from its parent is treated as a leaf
 	// (du -x). We cannot mount in unprivileged tests, but the same-deviceness

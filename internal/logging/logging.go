@@ -10,6 +10,7 @@ package logging
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -94,6 +95,18 @@ func Debugf(format string, args ...any) {
 // Errorf logs an error message when logging is enabled.
 func Errorf(format string, args ...any) {
 	logf("ERROR", format, args...)
+}
+
+// LogWriter returns the active log file as an io.Writer, or nil when logging
+// is disabled. Callers may mirror program output (e.g. recovered panic traces)
+// into the log.
+func LogWriter() io.Writer {
+	mu.Lock()
+	defer mu.Unlock()
+	if !on {
+		return nil
+	}
+	return file
 }
 
 func logf(level, format string, args ...any) {

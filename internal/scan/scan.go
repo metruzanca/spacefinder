@@ -101,6 +101,12 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 		node.Children = []*Node{} // non-nil marks the directory as expanded
 		return nil
 	}
+	// Device of node itself, for the same mount-point check the walk applies:
+	// a mount point is a du -x leaf — its own entry size — never re-walked.
+	parentDev := uint64(0)
+	if info, err := os.Lstat(node.Path); err == nil {
+		parentDev = infoDev(info)
+	}
 	children := make([]*Node, 0, len(entries))
 	var total int64
 	for _, e := range entries {
@@ -114,7 +120,11 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 		full := filepath.Join(node.Path, e.Name())
 		child := &Node{Name: e.Name(), Path: full, IsDir: stat.IsDir(), Parent: node}
 		if stat.IsDir() {
-			child.Size = s.totalOrMeasure(ctx, full, stat)
+			if dev := infoDev(stat); dev != 0 && dev != parentDev {
+				child.Size = infoSize(stat)
+			} else {
+				child.Size = s.totalOrMeasure(ctx, full, stat)
+			}
 		} else {
 			child.Size = infoSize(stat)
 		}
@@ -234,6 +244,9 @@ type throttle struct {
 }
 
 func (t *throttle) report(visited, errs int, current string) {
+	if t == nil {
+		return
+	}
 	t.curVisited += visited
 	t.curErrs += errs
 	if current != "" {

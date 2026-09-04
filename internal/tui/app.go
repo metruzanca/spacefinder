@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -15,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
+	"github.com/metruzanca/spacefinder/internal/logging"
 	"github.com/metruzanca/spacefinder/internal/scan"
 	"github.com/metruzanca/spacefinder/internal/treemap"
 )
@@ -41,6 +45,14 @@ type scanDoneMsg struct {
 	scanner *scan.Scanner
 	root    *scan.Node
 	err     error
+}
+
+// internalErrMsg is delivered when an internal background task panics. It
+// surfaces as the error view instead of killing the program, and the stack
+// trace is recorded in the debug log.
+type internalErrMsg struct {
+	op  string
+	err error
 }
 
 type expandDoneMsg struct {
@@ -127,8 +139,66 @@ func Run(rootPath string) error {
 		return errors.New("spacefinder is an interactive terminal app; run it in a terminal")
 	}
 	p := tea.NewProgram(newModel(rootPath), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Mirror stray stdout writes (bubbletea's own recovered-panic traces,
+	// debug.PrintStack output) into the debug log so a panic outside our
+	// recover handlers is still captured. The renderer writes through the fd
+	// it captured at NewProgram, so normal rendering is not mirrored.
+	if lw := logging.LogWriter(); lw != nil {
+		defer teeStdout(lw)()
+	}
 	_, err := p.Run()
 	return err
+}
+
+// teeStdout redirects writes made through the os.Stdout package variable into
+// w as well as the real stdout, while leaving fd 1 itself untouched. Returns
+// a func that restores os.Stdout and stops the drain when Run exits.
+func teeStdout(w io.Writer) func() {
+	r, pw, err := os.Pipe()
+	if err != nil {
+		return func() {}
+	}
+	old := os.Stdout
+	os.Stdout = pw
+	var once sync.Once
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer r.Close()
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				old.Write(buf[:n])
+				w.Write(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() {
+			os.Stdout = old
+			pw.Close() // EOF on the reader; stops the drain
+			wg.Wait()
+		})
+	}
+}
+
+// runSafe executes a background command, converting any panic into an
+// internalErrMsg so a bug in a scan or file task can never kill the program.
+// The stack trace is recorded in the debug log; without it, bubbletea would
+// swallow the panic and report a generic "program experienced a panic".
+func runSafe(op string, fn func() tea.Msg) (out tea.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Errorf("panic in %s: %v\n%s", op, r, debug.Stack())
+			out = internalErrMsg{op: op, err: fmt.Errorf("panic in %s: %v", op, r)}
+		}
+	}()
+	return fn()
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -142,8 +212,10 @@ func (m *Model) startScan(gen int) tea.Cmd {
 	m.cancelScan = cancel
 	ch := m.progressCh
 	return func() tea.Msg {
-		scanner, root, err := scan.Measure(ctx, m.rootPath, ch)
-		return scanDoneMsg{gen: gen, scanner: scanner, root: root, err: err}
+		return runSafe("measure "+m.rootPath, func() tea.Msg {
+			scanner, root, err := scan.Measure(ctx, m.rootPath, ch)
+			return scanDoneMsg{gen: gen, scanner: scanner, root: root, err: err}
+		})
 	}
 }
 
@@ -152,11 +224,13 @@ func (m *Model) startScan(gen int) tea.Cmd {
 func (m *Model) progressCmd() tea.Cmd {
 	ch := m.progressCh
 	return func() tea.Msg {
-		p, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return scanProgressMsg(p)
+		return runSafe("progress", func() tea.Msg {
+			p, ok := <-ch
+			if !ok {
+				return nil
+			}
+			return scanProgressMsg(p)
+		})
 	}
 }
 
@@ -165,14 +239,32 @@ func (m *Model) progressCmd() tea.Cmd {
 func (m *Model) expandCmd(node *scan.Node) tea.Cmd {
 	sc := m.scanner
 	return func() tea.Msg {
-		if sc == nil {
-			return expandDoneMsg{node: node}
-		}
-		return expandDoneMsg{node: node, err: sc.Expand(context.Background(), node)}
+		return runSafe("expand "+node.Path, func() tea.Msg {
+			if sc == nil {
+				return expandDoneMsg{node: node}
+			}
+			return expandDoneMsg{node: node, err: sc.Expand(context.Background(), node)}
+		})
 	}
 }
 
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+// Update drives the model from incoming messages. A panic while processing a
+// message is recovered here — instead of killing the program it shows the
+// error view and records the stack in the debug log. bubbletea would otherwise
+// swallow the panic and report a generic "program experienced a panic".
+func (m *Model) Update(msg tea.Msg) (tm tea.Model, cmd tea.Cmd) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Errorf("panic in Update: %v\n%s", r, debug.Stack())
+			m.mode = modeError
+			m.errMessage = fmt.Sprintf("internal error: %v", r)
+			tm = m
+		}
+	}()
+	return m.update(msg)
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Ignore zero reports (e.g. a pty with no size); the model starts with
@@ -229,6 +321,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeError
 			m.errMessage = fmt.Sprintf("open %s: %v", msg.path, msg.err)
 		}
+		return m, nil
+
+	case internalErrMsg:
+		m.mode = modeError
+		m.errMessage = msg.err.Error()
 		return m, nil
 
 	case scanDoneMsg:
@@ -473,10 +570,12 @@ func (m *Model) openFile() tea.Cmd {
 	}
 	path := n.Path
 	return func() tea.Msg {
-		if err := openDefault(path).Start(); err != nil {
-			return openDoneMsg{path: path, err: err}
-		}
-		return nil
+		return runSafe("open "+path, func() tea.Msg {
+			if err := openDefault(path).Start(); err != nil {
+				return openDoneMsg{path: path, err: err}
+			}
+			return nil
+		})
 	}
 }
 

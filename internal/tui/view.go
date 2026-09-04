@@ -3,11 +3,13 @@ package tui
 import (
 	"fmt"
 	"math"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/metruzanca/spacefinder/internal/logging"
 	"github.com/metruzanca/spacefinder/internal/treemap"
 )
 
@@ -29,7 +31,22 @@ func cellBounds(r treemap.Rect) rBounds {
 	}
 }
 
-func (m *Model) View() string {
+// View renders the current model. A panic while painting is recovered here so
+// a rendering bug can never kill the program: it shows the error view instead
+// and records the stack in the debug log.
+func (m *Model) View() (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Errorf("panic in View: %v\n%s", r, debug.Stack())
+			m.mode = modeError
+			m.errMessage = fmt.Sprintf("internal error: %v", r)
+			out = m.errorView()
+		}
+	}()
+	return m.view()
+}
+
+func (m *Model) view() string {
 	switch m.mode {
 	case modeSplash:
 		return m.splashView()
