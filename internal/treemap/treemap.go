@@ -42,6 +42,15 @@ type cell struct {
 // rectangles are non-overlapping, cover the container, and appear in the same
 // order as laid out.
 func Layout(items []Item, w, h int, maxRects int) []Rect {
+	return LayoutWith(items, w, h, maxRects, 0)
+}
+
+// LayoutWith is Layout plus a minimum per-tile footprint: items that would end
+// up smaller than minCells cells are considered insignificant and are folded
+// into the "other" bucket instead of being rendered (and selectable). minCells
+// of 0 renders everything. The largest item is always kept so a directory
+// never lays out as empty.
+func LayoutWith(items []Item, w, h, maxRects, minCells int) []Rect {
 	if w <= 0 || h <= 0 || len(items) == 0 {
 		return nil
 	}
@@ -62,31 +71,58 @@ func Layout(items []Item, w, h int, maxRects int) []Rect {
 	sort.SliceStable(work, func(i, j int) bool { return work[i].Size > work[j].Size })
 
 	kept := work
-	var other Item
+	var leftover int64
 	if maxRects > 0 && len(work) > maxRects {
 		m := maxRects
 		kept = work[:m]
-		var leftover int64
 		for _, it := range work[m:] {
 			leftover += it.Size
 		}
-		other = Item{Name: "other", Size: leftover, Selectable: false}
 	}
 
 	// Scale areas so they sum to the container area in cell units.
 	cellArea := float64(w) * float64(h)
 	scale := cellArea / float64(total)
 
-	cells := make([]cell, 0, len(kept)+1)
-	for i, it := range kept {
-		cells = append(cells, cell{Item: it, area: float64(it.Size) * scale, index: i})
+	// Fold items too small to matter into the "other" bucket.
+	var cells []cell
+	idx := 0
+	for _, it := range kept {
+		area := float64(it.Size) * scale
+		if minCells > 0 && area < float64(minCells) {
+			leftover += it.Size
+			continue
+		}
+		cells = append(cells, cell{Item: it, area: area, index: idx})
+		idx++
 	}
-	if other.Size > 0 {
-		cells = append(cells, cell{Item: other, area: float64(other.Size) * scale, index: -1})
+	// Keep at least the largest item so an all-tiny directory still renders.
+	if len(cells) == 0 && len(kept) > 0 {
+		big := kept[0]
+		cells = append(cells, cell{Item: big, area: float64(big.Size) * scale, index: 0})
+	}
+	if leftover > 0 {
+		cells = append(cells, cell{Item: Item{Name: "other", Size: leftover, Selectable: false}, area: float64(leftover) * scale, index: -1})
 	}
 
 	out := make([]Rect, 0, len(cells))
 	squarify(cells, 0, 0, float64(w), float64(h), &out)
+	// Floating-point scale arithmetic can nudge a rectangle a hair past the
+	// container. Clamp so no rendered extent ever escapes the grid.
+	for i := range out {
+		if out[i].X < 0 {
+			out[i].X = 0
+		}
+		if out[i].Y < 0 {
+			out[i].Y = 0
+		}
+		if out[i].X+out[i].W > float64(w) {
+			out[i].W = float64(w) - out[i].X
+		}
+		if out[i].Y+out[i].H > float64(h) {
+			out[i].H = float64(h) - out[i].Y
+		}
+	}
 	return out
 }
 
@@ -110,8 +146,11 @@ func squarify(cells []cell, x, y, w, h float64, out *[]Rect) {
 	layoutRow(row, x, y, w, h, out)
 }
 
-// worst reports the worst aspect ratio of a strip that occupies the shorter
-// side of the free box w×h.
+// worst reports the worst aspect ratio of a strip that hangs off the longest
+// side L = max(w, h) of the free box. For a strip of total area S containing a
+// smallest area sMin and largest area sMax, the paper derives
+//
+//	r = max(L²·sMin/S², S²/(L²·sMax)).
 func worst(row []cell, w, h float64) float64 {
 	var sum, max, min float64
 	min = math.Inf(1)
@@ -124,53 +163,47 @@ func worst(row []cell, w, h float64) float64 {
 		}
 		sum += c.area
 	}
-	if sum <= 0 {
+	if sum <= 0 || min == 0 {
 		return math.Inf(1)
 	}
-	// The paper derives r = max(a²·s1/S², S²/(a²·s2)) where a is the shorter
-	// side of the free box; s1/s2 are the largest/smallest areas in the row.
-	a := math.Min(w, h)
-	sq := a * a
-	return math.Max(sq*max/(sum*sum), sum*sum/(sq*min))
+	L := math.Max(w, h)
+	sq := L * L
+	return math.Max(sq*min/(sum*sum), sum*sum/(sq*max))
 }
 
-// layoutRow places a horizontal or vertical strip along the edge of the free
-// box x,y,w,h, appends the resulting rectangles to out, and returns the
-// remaining free box.
+// layoutRow places a strip of row cells along one edge of the free box
+// x,y,w,h: along the top for a landscape box (items span the width), along the
+// left for a portrait box (items span the height). It appends the resulting
+// rectangles to out and returns the remaining free box.
 func layoutRow(row []cell, x, y, w, h float64, out *[]Rect) (float64, float64, float64, float64) {
 	var sum float64
 	for _, c := range row {
 		sum += c.area
 	}
-	short := math.Min(w, h)
-	if short <= 0 || sum <= 0 {
+	if sum <= 0 || w <= 0 || h <= 0 {
 		// Degenerate remainder; nothing to place.
 		return x, y, 0, 0
 	}
-	if w < h {
-		// Vertical strip against the left edge, spanning the full width w.
-		// Each item gets height = area / w; the strip's thickness (in height)
-		// is the total area divide by the width.
+	if w >= h {
+		// Landscape: strip along the top, thickness measured down the height.
 		thick := sum / w
-		cy := y
+		cx := x
 		for i := range row {
-			rh := row[i].area / w
-			*out = append(*out, Rect{Index: row[i].index, X: x, Y: cy, W: w, H: rh})
-			cy += rh
+			rw := row[i].area / thick
+			*out = append(*out, Rect{Index: row[i].index, X: cx, Y: y, W: rw, H: thick})
+			cx += rw
 		}
-		return x, cy, w, h - thick
+		return x, y + thick, w, h - thick
 	}
-	// Horizontal strip along the top edge, spanning the full height h. Each
-	// item gets width = area / h; the strip's thickness (in width) is the total
-	// area divided by the height.
+	// Portrait: strip along the left, thickness measured across the width.
 	thick := sum / h
-	cx := x
+	cy := y
 	for i := range row {
-		rw := row[i].area / h
-		*out = append(*out, Rect{Index: row[i].index, X: cx, Y: y, W: rw, H: h})
-		cx += rw
+		rh := row[i].area / thick
+		*out = append(*out, Rect{Index: row[i].index, X: x, Y: cy, W: thick, H: rh})
+		cy += rh
 	}
-	return cx, y, w - thick, h
+	return x + thick, y, w - thick, h
 }
 
 // Raster assigns every cell of a w×h grid to the rectangle that contains the
