@@ -23,3 +23,18 @@ The scan behaves like `du -x -B1 --max-depth=1`, but lazily:
 - Deletion subtracts the removed entry's real size up the visible ancestor
   chain and invalidates its recorded total so a repeat of that folder is
   re-measured correctly.
+
+## Rendering (implemented)
+
+- Squarified treemap with the aspect heuristic measured against the **longest**
+  side of the free box and strips laid along the correct axis — a prior
+  inverted/second-axis bug degraded every level into a full-height bar chart.
+- Tile **areas are sqrt-scaled**: ranking and order stay truthful while a
+  dominant folder no longer reduces its neighbours to hairlines; labels and
+  percentages always show real block counts.
+- Blocks fill the whole area **edge-to-edge without borders**; the selection is
+  the only outlined block (accent box). Arrow/wheel navigation moves by block
+  edges — the chosen neighbour is the nearest block strictly beyond the
+  current one in the pressed direction, best aligned across the other axis.
+- A **free-space gutter** row (statfs free bytes on the partition) shows at the
+  scan root only, capped to a few rows so the content map keeps the screen.

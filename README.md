@@ -25,11 +25,13 @@ effectively instant.
 
 ### Controls
 
-| Key | Action |
+| Input | Action |
 | --- | --- |
 | `↑ ↓ ← →` / `h j k l` | move the selection between squares |
-| `Enter` | drill into the selected directory |
-| `Esc` | go up to the parent |
+| mouse click | select the square under the cursor |
+| mouse double-click / `Enter` | drill into the selected directory |
+| mouse wheel | move the selection |
+| mouse right-click / `Esc` | go up to the parent |
 | `Delete` / `Backspace` | open the delete prompt |
 | `r` | re-scan the root |
 | `q` / `Ctrl+C` | quit |
@@ -42,10 +44,22 @@ never be deleted through the UI.
 
 - **Spacesniffer-style rendering** via `bubbles`/`bubbletea` on the alternate
   screen; rectangles are laid out with a squarified treemap algorithm and
-  colored deterministically.
-- **Top-`N` + "other" bucketing.** Directories with hundreds of children show
-  their largest ~128 entries as individual squares (the rest collapse into a
-  single gray `other` tile) so the view stays fast and legible.
+  colored deterministically. Blocks fill the whole area edge-to-edge with no
+  borders; the selection is marked by brightening the block and a `▸` on its
+  label, so the treemap stays fully visible even when a terminal disables
+  colors (`NO_COLOR`).
+- **Only significant blocks show.** Directory entries too small to earn a
+  tile (a couple of cells) are folded into the gray, non-selectable `other`
+  bucket and counted as `hidden` in the status line — they are neither drawn
+  nor reachable with the arrow keys or mouse. spacefinder is for spotting the
+  big consumers, not the tail.
+- **Square-tile proportions.** Tile areas are square-root scaled from byte
+  counts: ordering and ranking stay true, but a folder that dominates the disk
+  no longer squashes every neighbour into hairline columns — the treemap stays
+  legible as squares. Labels and percentages always show the true sizes.
+- **Free-space gutter.** At the scan root, a muted band shows how much of the
+  partition is still free (from `statfs`), e.g. `free · 1.2 TB`; drilling in
+  hides it since free space belongs to the partition, not a folder.
 - **`du`-style, lazy sizing.** The initial pass measures the whole tree like
   `du -x -B1`: sizes are allocated blocks, matching what `du` reports, one
   filesystem (mount points are treated as leaves), and each hardlink is
@@ -70,9 +84,9 @@ never be deleted through the UI.
 ## How the pieces fit
 
 - `internal/scan` — du-style measure pass (allocated blocks, single
-  filesystem, hardlink dedup) that records every directory's total, plus lazy
-  per-level `Expand` for the tree.
+  filesystem, hardlink dedup) that records every directory's total, per-level
+  lazy `Expand` for the tree, and statfs free-space reporting.
 - `internal/treemap` — the squarified layout algorithm over a cell grid.
 - `internal/tui` — the bubbletea app: splash, treemap rendering, lazy
-  navigation, and the type-to-confirm delete modal.
+  navigation, the free-space gutter, and the type-to-confirm delete modal.
 - `cmd/root.go` — Cobra entrypoint; picks the default root and starts the TUI.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,7 +19,12 @@ import (
 	"github.com/metruzanca/spacefinder/internal/treemap"
 )
 
-const maxRects = 128
+const maxRects = 200
+
+// minTileCells is the smallest footprint a directory may occupy in the
+// treemap before it is considered insignificant and folded into the (hidden,
+// non-selectable) "other" bucket instead of being rendered.
+const minTileCells = 4
 
 type mode int
 
@@ -70,7 +76,16 @@ type Model struct {
 	height  int
 	rects   []treemap.Rect
 	raster  []int
+	tiles   []tileStyle
 	sel     int
+	hidden  int // children with a zero block size, dropped from the layout
+
+	// free-space gutter (only shown at the scan root)
+	freeBytes int64
+
+	// mouse state
+	lastClick     time.Time
+	lastClickTile int
 
 	// delete-confirm state
 	confirmNode *scan.Node
@@ -95,6 +110,8 @@ func newModel(rootPath string) *Model {
 		spinner:    sp,
 		input:      input,
 		sel:        -1,
+		width:      80,
+		height:     24,
 		progressCh: make(chan scan.Progress, 128),
 	}
 }
@@ -104,7 +121,7 @@ func Run(rootPath string) error {
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
 		return errors.New("spacefinder is an interactive terminal app; run it in a terminal")
 	}
-	p := tea.NewProgram(newModel(rootPath), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(rootPath), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
@@ -153,11 +170,21 @@ func (m *Model) expandCmd(node *scan.Node) tea.Cmd {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		// Ignore zero reports (e.g. a pty with no size); the model starts with
+		// sane defaults so a 0x0 query never blanks the UI.
+		if msg.Width > 0 {
+			m.width = msg.Width
+		}
+		if msg.Height > 0 {
+			m.height = msg.Height
+		}
 		if m.mode == modeBrowse && m.current != nil {
 			m.buildLayout()
 		}
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 
 	case tea.KeyMsg:
 		return m.updateKeys(msg)
@@ -205,11 +232,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tree = msg.root
 		m.current = msg.root
 		m.crumbs = nil
+		m.freeBytes = freeOn(m.rootPath)
 		m.mode = modeBrowse
 		m.buildLayout()
 		return m, nil
 	}
 	return m, nil
+}
+
+// freeOn reports free bytes on the scan root's filesystem, or 0 when
+// unavailable (e.g. windows).
+func freeOn(path string) int64 {
+	if n, err := scan.Free(path); err == nil {
+		return n
+	}
+	return 0
 }
 
 func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -285,6 +322,34 @@ func (m *Model) quit() (tea.Model, tea.Cmd) {
 		m.cancelScan()
 	}
 	return m, tea.Quit
+}
+
+// updateMouse handles pointer interaction: click selects, a same-tile click
+// within the debounce window drills in, right-click goes up, and the wheel
+// moves the selection.
+func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		tile := m.cellAt(msg.X, msg.Y)
+		if tile < 0 || tile >= len(m.rects) || m.rects[tile].Index < 0 {
+			return m, nil
+		}
+		now := time.Now()
+		double := tile == m.lastClickTile && now.Sub(m.lastClick) < 350*time.Millisecond
+		m.lastClickTile = tile
+		m.lastClick = now
+		m.sel = tile
+		if double {
+			return m, m.drill()
+		}
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
+		m.up()
+	case msg.Button == tea.MouseButtonWheelUp:
+		m.moveSel(0, -1)
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.moveSel(0, 1)
+	}
+	return m, nil
 }
 
 // openConfirm opens the delete-confirmation modal for the selected node. It
@@ -415,10 +480,33 @@ func (m *Model) buildLayout() {
 	w, h := m.treemapSize()
 	items := make([]treemap.Item, len(children))
 	for i, c := range children {
-		items[i] = treemap.Item{Name: c.Name, Size: c.Size, Selectable: true}
+		// sqrt-scaled area: monotonic and ranking-preserving, but a dominant
+		// folder no longer swamps the view, so small entries stay square-ish.
+		// Labels and status percentages keep the true byte counts.
+		items[i] = treemap.Item{Name: c.Name, Size: layoutSize(c.Size), Selectable: true}
 	}
-	m.rects = treemap.Layout(items, w, h, maxRects)
+	m.rects = treemap.LayoutWith(items, w, h, maxRects, minTileCells)
 	m.raster = treemap.Raster(m.rects, w, h)
+	// Precompute every tile's style set (per-child colour) and count the
+	// children that end up not rendered at all (zero-size or too small to
+	// matter): they are neither drawn nor selectable.
+	m.tiles = make([]tileStyle, len(m.rects))
+	rendered := make(map[int]bool, len(m.rects))
+	for i := range m.rects {
+		idx := m.rects[i].Index
+		if idx < 0 {
+			m.tiles[i] = otherStyle
+			continue
+		}
+		rendered[idx] = true
+		m.tiles[i] = styleFor(children[idx].Name)
+	}
+	m.hidden = 0
+	for i, c := range children {
+		if c.Size <= 0 || !rendered[i] {
+			m.hidden++
+		}
+	}
 	if m.sel >= len(m.rects) {
 		m.sel = -1
 	}
@@ -435,7 +523,37 @@ func (m *Model) treemapSize() (int, int) {
 	if h < 1 {
 		h = 1
 	}
+	h -= m.freeRows()
+	if h < 1 {
+		h = 1
+	}
 	return w, h
+}
+
+// freeRows is the height in rows reserved for the free-space gutter: shown
+// only at the scan root when free space is known, and capped small so it never
+// eats the map.
+func (m *Model) freeRows() int {
+	if m.freeBytes <= 0 || m.current != m.tree {
+		return 0
+	}
+	n := (m.height - 2) / 12
+	if n < 1 {
+		n = 1
+	}
+	if n > 3 {
+		n = 3
+	}
+	return n
+}
+
+// layoutSize maps a byte count to a monotonic, ranking-preserving area input;
+// the square root tames dominant entries for legible square tiles.
+func layoutSize(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return 1 + int64(math.Sqrt(float64(n)))
 }
 
 // selectedNode returns the scan node behind the current selection, or nil when

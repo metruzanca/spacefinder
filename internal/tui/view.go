@@ -5,7 +5,6 @@ import (
 	"math"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -40,6 +39,13 @@ func (m *Model) View() string {
 		return m.errorView()
 	}
 
+	if m.width < minWidth || m.height < minHeight {
+		return strings.Join(centerRows(m.height, []string{
+			lipgloss.NewStyle().Bold(true).Render("terminal too small"),
+			"spacefinder needs at least 20x10 cells",
+		}), "\n")
+	}
+
 	w, h := m.treemapSize()
 	var idxBuf [][]int
 	var buf [][]rune
@@ -50,16 +56,54 @@ func (m *Model) View() string {
 		}
 	}
 
-	lines := []string{m.breadcrumbLine()}
-	for _, row := range compose(m.rects, idxBuf, buf, w, h, m.sel) {
-		lines = append(lines, row)
+	rows := []string{m.breadcrumbLine()}
+	switch {
+	case m.mode == modeConfirm:
+		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
+	case len(m.rects) == 0:
+		rows = append(rows, centerRows(h, []string{
+			lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("empty directory"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("press esc to go up"),
+		})...)
+	default:
+		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
 	}
-	lines = append(lines, m.statusLine())
-	return strings.Join(lines, "\n")
+	if n := m.freeRows(); n > 0 {
+		rows = append(rows, m.freeGutterRows(n, m.width)...)
+	}
+	rows = append(rows, m.statusLine())
+	return strings.Join(rows, "\n")
 }
 
+// freeGutterRows renders the free-space gutter: a muted band, labeled with the
+// real free byte count, below the content treemap.
+func (m *Model) freeGutterRows(n, width int) []string {
+	style := freeStyle()
+	label := fmt.Sprintf(" free · %s ", formatBytes(m.freeBytes))
+	rows := make([]string, n)
+	pad := width - lipgloss.Width(label)
+	if pad < 1 {
+		pad = 1
+	}
+	left := pad / 2
+	for i := 0; i < n; i++ {
+		if i == 0 {
+			rows[i] = style.Render(strings.Repeat(" ", left) + label + strings.Repeat(" ", pad-left))
+		} else {
+			rows[i] = style.Render(strings.Repeat(" ", width))
+		}
+	}
+	return rows
+}
+
+const (
+	minWidth  = 20
+	minHeight = 10
+)
+
 // frame renders the treemap into a per-cell index matrix (parallel to the
-// raster) and a rune matrix holding border and label characters.
+// raster) and a rune matrix holding label characters. There are no borders:
+// the selection is indicated by a brighter fill and a marker on its label.
 func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 	idxBuf := make([][]int, h)
 	buf := make([][]rune, h)
@@ -70,7 +114,7 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 			idxBuf[y][x] = -1
 		}
 	}
-	if len(m.rects) == 0 || len(m.raster) != w*h {
+	if len(m.raster) != w*h || len(m.tiles) != len(m.rects) {
 		return idxBuf, buf
 	}
 	for y := 0; y < h; y++ {
@@ -81,10 +125,26 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 
 	bounds := make([]rBounds, len(m.rects))
 	for i := range m.rects {
-		bounds[i] = cellBounds(m.rects[i])
+		b := cellBounds(m.rects[i])
+		// Clamp floats that drifted past the grid; label painting must never
+		// index outside the frame matrices.
+		if b.x1 > w {
+			b.x1 = w
+		}
+		if b.y1 > h {
+			b.y1 = h
+		}
+		if b.x0 < 0 {
+			b.x0 = 0
+		}
+		if b.y0 < 0 {
+			b.y0 = 0
+		}
+		bounds[i] = b
 	}
 
-	// Labels for every real entry.
+	// Labels for every real entry, centred inside the block; the selected
+	// block's name carries a marker so the selection reads without borders.
 	for i := range m.rects {
 		ri := m.rects[i].Index
 		if ri < 0 || m.current == nil || ri >= len(m.current.Children) {
@@ -92,15 +152,15 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 		}
 		node := m.current.Children[ri]
 		b := bounds[i]
-		drawLabel(buf, b, node.Name)
+		name := node.Name
+		if i == m.sel {
+			name = "▸ " + name
+		}
+		drawLabel(buf, b, name)
 		if b.y1-b.y0 >= 5 {
 			mid := b.y0 + (b.y1-b.y0)/2
 			drawLabelAt(buf, b, mid+1, formatBytes(node.Size))
 		}
-	}
-	// Border around the selected rectangle.
-	if m.sel >= 0 && m.sel < len(m.rects) {
-		drawBorder(buf, bounds[m.sel])
 	}
 	return idxBuf, buf
 }
@@ -117,40 +177,16 @@ func drawLabel(buf [][]rune, b rBounds, text string) {
 
 func drawLabelAt(buf [][]rune, b rBounds, row int, text string) {
 	avail := b.x1 - b.x0 - 2
-	if avail < 1 || row < b.y0 || row >= b.y1 {
+	if avail < 1 || row <= b.y0 || row >= b.y1-1 {
 		return
 	}
 	runes := []rune(text)
 	if len(runes) > avail {
 		runes = runes[:avail]
 	}
-	start := b.x0 + (b.x1-b.x0-len(runes))/2
+	start := b.x0 + 1 + (avail-len(runes))/2
 	for i, r := range runes {
 		buf[row][start+i] = r
-	}
-}
-
-// drawBorder outlines a rectangle with box-drawing runes.
-func drawBorder(buf [][]rune, b rBounds) {
-	top, bottom, left, right := b.y0, b.y1-1, b.x0, b.x1-1
-	if bottom < top || right < left {
-		return
-	}
-	buf[top][left] = '┌'
-	buf[top][right] = '┐'
-	buf[bottom][left] = '└'
-	buf[bottom][right] = '┘'
-	for x := left + 1; x < right; x++ {
-		buf[top][x] = '─'
-		if bottom != top {
-			buf[bottom][x] = '─'
-		}
-	}
-	for y := top + 1; y < bottom; y++ {
-		buf[y][left] = '│'
-		if right != left {
-			buf[y][right] = '│'
-		}
 	}
 }
 
@@ -171,7 +207,7 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 
 	boxW := 0
 	for _, l := range text {
-		if n := len([]rune(l)); n > boxW {
+		if n := lipgloss.Width(l); n > boxW {
 			boxW = n
 		}
 	}
@@ -198,7 +234,7 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 			buf[y][x] = r
 		}
 	}
-	// Full-width scrim so neighboring labels do not bleed into the dialog rows.
+	// Full-width scrim so neighbouring labels do not bleed into the dialog rows.
 	for yy := oy; yy < oy+boxH && yy < h; yy++ {
 		for xx := 0; xx < w; xx++ {
 			paint(xx, yy, ' ', idxModalBG)
@@ -241,18 +277,12 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 		if i >= boxH-2 {
 			break
 		}
-		runes := []rune(line)
-		if len(runes) > boxW-2 {
-			runes = runes[:boxW-2]
-		}
+		runes := []rune(truncate(line, boxW-2))
 		row := oy + 1 + i
 		start := ox + 1 + (boxW-2-len(runes))/2
 		idx := idxModalFG
 		if i == len(text)-1 && m.confirmErr {
 			idx = idxModalErr
-		}
-		if i == 0 {
-			idx = idxModalFG
 		}
 		for j, r := range runes {
 			paint(start+j, row, r, idx)
@@ -262,8 +292,8 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 
 // compose turns the frame matrices into styled terminal lines, batching
 // consecutive cells that share a rectangle and character.
-func compose(rects []treemap.Rect, idxBuf [][]int, buf [][]rune, w, h, sel int) []string {
-	if len(idxBuf) != h {
+func compose(tiles []tileStyle, idxBuf [][]int, buf [][]rune, w, h, sel int) []string {
+	if len(idxBuf) != h || len(buf) != h {
 		return nil
 	}
 	rows := make([]string, h)
@@ -278,10 +308,15 @@ func compose(rects []treemap.Rect, idxBuf [][]int, buf [][]rune, w, h, sel int) 
 				n++
 			}
 			fill := " "
-			if ch != 0 {
+			switch {
+			case ch != 0:
 				fill = strings.Repeat(string(ch), n)
+			case idx >= 0:
+				// Solid blocks keep tiles visible even when the terminal
+				// skips background colours.
+				fill = strings.Repeat("█", n)
 			}
-			sb.WriteString(styleOf(rects, idx, sel, ch).Render(fill))
+			sb.WriteString(styleOf(tiles, idx, sel, ch).Render(fill))
 			x += n
 		}
 		rows[y] = sb.String()
@@ -289,87 +324,151 @@ func compose(rects []treemap.Rect, idxBuf [][]int, buf [][]rune, w, h, sel int) 
 	return rows
 }
 
-func styleOf(rects []treemap.Rect, idx, sel int, ch rune) lipgloss.Style {
-	s := lipgloss.NewStyle()
+func styleOf(tiles []tileStyle, idx, sel int, ch rune) lipgloss.Style {
 	switch {
 	case idx == idxModalBG:
-		return s.Background(lipgloss.Color("232"))
+		return lipgloss.NewStyle().Background(lipgloss.Color("232"))
 	case idx == idxModalFG, idx == idxModalErr:
-		s = s.Background(lipgloss.Color("232"))
-		fg := colLabelFG
+		s := lipgloss.NewStyle().Background(lipgloss.Color("232"))
 		if idx == idxModalErr {
-			fg = colErr
+			return s.Foreground(lipgloss.Color(colErr)).Bold(true)
 		}
-		return s.Foreground(lipgloss.Color(fg)).Bold(true)
-	case idx == sel:
-		s = s.Background(lipgloss.Color(colSelBG))
+		return s.Foreground(lipgloss.Color("255")).Bold(true)
+	case idx == sel && idx >= 0 && idx < len(tiles):
+		ts := tiles[idx]
 		if ch != 0 {
-			s = s.Foreground(lipgloss.Color(colSelFG)).Bold(true)
+			return ts.selGlyph
 		}
-		return s
-	case idx < 0:
-		// Gap cell; no background.
-		return s
+		return ts.selFill
+	case idx >= 0 && idx < len(tiles):
+		ts := tiles[idx]
+		if ch != 0 {
+			return ts.glyph
+		}
+		return ts.fill
 	default:
-		isOther := idx < len(rects) && rects[idx].Index < 0
-		if isOther {
-			s = s.Background(lipgloss.Color(colOtherBG))
-			if ch != 0 {
-				s = s.Foreground(lipgloss.Color(colOtherFG)).Bold(true)
-			}
-			return s
-		}
-		s = s.Background(lipgloss.Color(palette[idx%len(palette)]))
-		if ch != 0 {
-			s = s.Foreground(lipgloss.Color(colLabelFG)).Bold(true)
-		}
-		return s
+		// Gap cell; no background, plain.
+		return lipgloss.NewStyle()
 	}
 }
 
 func (m *Model) breadcrumbLine() string {
-	path := ""
-	if m.current != nil {
-		path = m.current.Path
+	if m.current == nil {
+		return ""
+	}
+	max := m.width - 1
+	if max < 1 {
+		max = 1
 	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	return " " + dim.Render("▸ "+path)
+	segs := []string{"⌂ " + m.rootPath}
+	rest := m.crumbs
+	if len(rest) > 0 && rest[0] == m.tree {
+		rest = rest[1:] // the root is already shown by its absolute path
+	}
+	for _, c := range rest {
+		segs = append(segs, c.Name)
+	}
+	if m.current != m.tree {
+		segs = append(segs, m.current.Name)
+	}
+
+	join := func(ss []string, folded bool) string {
+		var b strings.Builder
+		if folded {
+			b.WriteString(dim.Render("… / "))
+		}
+		for i, s := range ss {
+			if i > 0 {
+				b.WriteString(dim.Render(" / "))
+			}
+			st := dim
+			if i == len(ss)-1 {
+				st = accent()
+			}
+			b.WriteString(st.Render(s))
+		}
+		return b.String()
+	}
+	s := join(segs, false)
+	for lipgloss.Width(s) > max && len(segs) > 1 {
+		segs = segs[1:]
+		s = join(segs, true)
+	}
+	return s
 }
 
 func (m *Model) statusLine() string {
-	right := "↑↓←→/hjkl move · ⏎ drill · esc up · del delete · r rescan · q quit"
-	var left string
-	if n := m.selectedNode(); n != nil {
-		pct := ""
-		if m.current != nil && m.current.Size > 0 {
-			pct = fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
-		}
-		left = fmt.Sprintf(" ▸ %s [%s]%s", n.Name, formatBytes(n.Size), pct)
-	}
-	fill := m.width - displayWidth(left) - displayWidth(right)
-	if fill < 1 {
-		fill = 1
+	max := m.width
+	if max < 1 {
+		max = 1
 	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	return left + dim.Render(strings.Repeat("·", fill)) + dim.Render(right)
-}
+	hint := "click=sel · 2x=drill · esc=up · del=delete · q=quit"
 
-func displayWidth(s string) int {
-	return utf8.RuneCountInString(s)
-}
-
-func (m *Model) splashView() string {
-	lines := []string{
-		"",
-		accent().Render(m.spinner.View()) + "  Scanning " + lipgloss.NewStyle().Bold(true).Render(m.rootPath),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render(m.progress.Current),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render(
-			fmt.Sprintf("visited %d · errors %d · %s", m.progress.Visited, m.progress.Errors, time.Since(m.start).Round(time.Second)),
-		),
+	var left string
+	if n := m.selectedNode(); n != nil {
+		left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
+		if m.current != nil && m.current.Size > 0 {
+			left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
+		}
+		if m.current != nil {
+			left += fmt.Sprintf(" · %d children", len(m.current.Children))
+			if m.hidden > 0 {
+				left += fmt.Sprintf(" · %d hidden", m.hidden)
+			}
+		}
 	}
-	// Vertically center within the terminal.
-	pad := (m.height - len(lines)) / 2
+	left = truncate(left, max)
+	if left == "" {
+		return dim.Render(hint)
+	}
+
+	const gap = 1
+	fill := max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
+	if fill < 1 {
+		avail := max - lipgloss.Width(left) - gap
+		if avail < 1 {
+			avail = 1
+		}
+		hint = truncate(hint, avail)
+		fill = max - lipgloss.Width(left) - lipgloss.Width(hint) - 2*gap
+		if fill < 0 {
+			fill = 0
+		}
+	}
+	out := left
+	if fill > 0 {
+		out += " " + dim.Render(strings.Repeat("·", fill)) + " "
+	} else {
+		out += " "
+	}
+	out += dim.Render(hint)
+	return out
+}
+
+// cellAt maps terminal (0-based) coordinates to the rectangle under the
+// cursor, or -1 when the point is outside the treemap. The treemap body starts
+// on the line below the breadcrumb, so the y offset is adjusted by one.
+func (m *Model) cellAt(x, y int) int {
+	w, h := m.treemapSize()
+	if len(m.raster) != w*h || w <= 0 || h <= 0 {
+		return -1
+	}
+	ty := y - 1
+	if ty < 0 || ty >= h || x < 0 || x >= w {
+		return -1
+	}
+	return m.raster[ty*w+x]
+}
+
+// centerRows pads lines into areaH rows, vertically centered.
+func centerRows(areaH int, lines []string) []string {
+	n := areaH
+	if n < len(lines) {
+		n = len(lines)
+	}
+	pad := (n - len(lines)) / 2
 	if pad < 1 {
 		pad = 1
 	}
@@ -377,7 +476,21 @@ func (m *Model) splashView() string {
 	for i := 0; i < pad; i++ {
 		out = append(out, "")
 	}
-	return strings.Join(append(out, lines...), "\n")
+	return append(out, lines...)
+}
+
+func (m *Model) splashView() string {
+	path := truncate(m.progress.Current, max(20, m.width-10))
+	lines := []string{
+		"",
+		accent().Render(m.spinner.View()) + "  Scanning " + lipgloss.NewStyle().Bold(true).Render(truncate(m.rootPath, m.width-14)),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render(path),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render(
+			fmt.Sprintf("visited %d · errors %d · %s", m.progress.Visited, m.progress.Errors, time.Since(m.start).Round(time.Second)),
+		),
+	}
+	return strings.Join(centerRows(m.height, lines), "\n")
 }
 
 // measuringView is shown briefly while a drilled directory's next level is
@@ -385,19 +498,11 @@ func (m *Model) splashView() string {
 func (m *Model) measuringView() string {
 	lines := []string{
 		"",
-		accent().Render(m.spinner.View()) + "  Measuring " + lipgloss.NewStyle().Bold(true).Render(m.pending.Path),
+		accent().Render(m.spinner.View()) + "  Measuring " + lipgloss.NewStyle().Bold(true).Render(truncate(m.pending.Path, m.width-12)),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(colDim)).Render("this expands one level; sizes below are already known from the scan"),
 	}
-	pad := (m.height - len(lines)) / 2
-	if pad < 1 {
-		pad = 1
-	}
-	out := make([]string, 0, pad+len(lines))
-	for i := 0; i < pad; i++ {
-		out = append(out, "")
-	}
-	return strings.Join(append(out, lines...), "\n")
+	return strings.Join(centerRows(m.height, lines), "\n")
 }
 
 func (m *Model) errorView() string {
@@ -407,13 +512,5 @@ func (m *Model) errorView() string {
 		Padding(1, 2).
 		Width(50).
 		Render("spacefinder: " + m.errMessage + "\n\nPress q to quit.")
-	pad := (m.height - 6) / 2
-	if pad < 1 {
-		pad = 1
-	}
-	out := make([]string, 0, pad+1)
-	for i := 0; i < pad; i++ {
-		out = append(out, "")
-	}
-	return strings.Join(append(out, box), "\n")
+	return strings.Join(centerRows(m.height, []string{box}), "\n")
 }

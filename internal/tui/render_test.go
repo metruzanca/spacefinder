@@ -4,7 +4,10 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/metruzanca/spacefinder/internal/scan"
 )
 
 var update = flag.Bool("update", false, "update golden files")
@@ -65,5 +68,43 @@ func TestFormatBytes(t *testing.T) {
 		if got := formatBytes(c.in); got != c.want {
 			t.Errorf("formatBytes(%d) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// fixtureModel builds a browsable model over the games/videos/projects/misc
+// fixture the user used to describe the squarified squares.
+func fixtureModel(w, h int) *Model {
+	m := newModel("/")
+	m.mode = modeBrowse
+	m.width, m.height = w, h
+	m.tree = &scan.Node{Name: "fs", Path: "/", IsDir: true, Children: []*scan.Node{
+		{Name: "games", Path: "/games", IsDir: true, Size: 50},
+		{Name: "videos", Path: "/videos", IsDir: true, Size: 30},
+		{Name: "projects", Path: "/projects", IsDir: true, Size: 15},
+		{Name: "misc", Path: "/misc", IsDir: true, Size: 5},
+	}}
+	m.current = m.tree
+	m.buildLayout()
+	return m
+}
+
+// TestSquaresFixtureGolden is the byte-exact regression for the renaming
+// symptom the user reported ("just edges of squares"): tile interiors must be
+// solid blocks, not empty space.
+func TestSquaresFixtureGolden(t *testing.T) {
+	golden(t, "squares_4", fixtureModel(44, 22).View())
+}
+
+// TestNoColorStillShowsBlocks reproduces the user's environment (NO_COLOR=1
+// pushes termenv to the Ascii profile, dropping background fills) and asserts
+// the treemap still renders as solid squares rather than a wireframe.
+func TestNoColorStillShowsBlocks(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	v := fixtureModel(44, 22).View()
+	if n := strings.Count(v, "█"); n < 100 {
+		t.Fatalf("interior blocks missing under NO_COLOR: found %d █ runes", n)
+	}
+	if strings.Count(v, "█") <= strings.Count(v, "└") {
+		t.Fatal("treemap is still mostly edges; interiors are not filled")
 	}
 }
