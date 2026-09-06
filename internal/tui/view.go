@@ -585,7 +585,7 @@ func (m *Model) infoLine() string {
 	if max < 1 {
 		max = 1
 	}
-	var left string
+	var left, right string
 	switch m.effectiveMode() {
 	case modePicker:
 		if n := m.selectedPickerNode(); n != nil {
@@ -607,15 +607,30 @@ func (m *Model) infoLine() string {
 			if m.current != nil && m.current.Size > 0 {
 				left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
 			}
-			if m.current != nil {
-				left += fmt.Sprintf(" · %d children", len(m.current.Children))
-				if m.hidden > 0 {
-					left += fmt.Sprintf(" · %d hidden", m.hidden)
-				}
+		}
+		if m.current != nil {
+			right = fmt.Sprintf("%d children", len(m.current.Children))
+			if m.hidden > 0 {
+				right += fmt.Sprintf(" · %d hidden", m.hidden)
 			}
 		}
 	}
-	return truncate(left, max)
+	// The right group (children/hidden) reflects the drilled directory, not the
+	// selection, so it is pinned to the right edge while the selection group
+	// occupies the left.
+	if right == "" {
+		return truncate(left, max)
+	}
+	rightW := lipgloss.Width(right)
+	if max <= rightW {
+		return truncate(right, max)
+	}
+	left = truncate(left, max-rightW)
+	pad := max - lipgloss.Width(left) - rightW
+	if pad < 0 {
+		pad = 0
+	}
+	return left + strings.Repeat(" ", pad) + right
 }
 
 // keybind is one keybord/mouse shortcut shown in the bottom help bar.
