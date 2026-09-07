@@ -234,6 +234,9 @@ func wrapText(s string, width int) []string {
 // current block in that axis, and the chosen one is the nearest such block
 // (smallest gap) best aligned with the current block's centre along the other
 // axis. That gives natural neighbour-to-neighbour movement across the tiles.
+// At a page's reading-order extreme with no block beyond, the move wraps to
+// the neighbouring page (arrows, vim keys, and the wheel all route through
+// here).
 func (m *Model) moveSel(dx, dy int) {
 	if m.sel < 0 || len(m.rects) == 0 {
 		return
@@ -256,6 +259,19 @@ func (m *Model) moveSel(dx, dy int) {
 	}
 	if best >= 0 {
 		m.sel = best
+		return
+	}
+	// No block in that direction: wrap to the neighbouring page when the
+	// selection already sits at the page's extreme, so the bottom-right tail
+	// reads on naturally into the next page.
+	if dx > 0 || dy > 0 {
+		if m.sel == lastSelectable(m.rects) && m.nextPage() {
+			m.sel = firstSelectable(m.rects)
+		}
+		return
+	}
+	if m.sel == firstSelectable(m.rects) && m.prevPage() {
+		m.sel = lastSelectable(m.rects)
 	}
 }
 

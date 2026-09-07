@@ -177,13 +177,13 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 	// block's name carries a marker so the selection reads without borders.
 	for i := range m.rects {
 		ri := m.rects[i].Index
-		if ri < 0 || m.current == nil || ri >= len(m.current.Children) {
+		if ri < 0 || m.current == nil || ri >= len(m.pageIdx) {
 			continue
 		}
-		node := m.current.Children[ri]
+		node := m.current.Children[m.pageIdx[ri]]
 		b := bounds[i]
 		name := node.Name
-		if i == m.sel {
+		if i == m.sel && b.x1-b.x0-2 >= 4 {
 			name = "▸ " + name
 		}
 		drawLabel(buf, b, name)
@@ -211,8 +211,13 @@ func drawLabelAt(buf [][]rune, b rBounds, row int, text string) {
 		return
 	}
 	runes := []rune(text)
+	cut := false
 	if len(runes) > avail {
 		runes = runes[:avail]
+		cut = true
+	}
+	if cut && len(runes) > 0 {
+		runes[len(runes)-1] = '…'
 	}
 	start := b.x0 + 1 + (avail-len(runes))/2
 	for i, r := range runes {
@@ -260,6 +265,7 @@ type helpTableRow struct {
 func (m *Model) helpRows() []helpTableRow {
 	kb := []helpTableRow{
 		{left: "↑↓←→ / hjkl", right: "move the selection"},
+		{left: "tab / shift+tab", right: "next / previous page of tiles"},
 		{left: "enter", right: "drill into a folder"},
 		{left: "esc", right: "go up a level"},
 		{left: "r", right: "rescan the current root"},
@@ -687,6 +693,9 @@ func (m *Model) infoLine() string {
 			if m.hidden > 0 {
 				right += fmt.Sprintf(" · %d hidden", m.hidden)
 			}
+			if m.pageCount > 1 {
+				right += fmt.Sprintf(" · page %d/%d", m.page+1, m.pageCount)
+			}
 		}
 		if m.current == m.tree && m.scanErrTotal > 0 {
 			err := lipgloss.NewStyle().
@@ -740,6 +749,9 @@ func (m *Model) helpLineBindings() []keybind {
 		{"del", "delete"},
 		{"?", "help"},
 		{"q", "quit"},
+	}
+	if m.pageCount > 1 {
+		kb = append([]keybind{{"tab", "next page"}}, kb...)
 	}
 	if m.scanErrTotal > 0 {
 		kb = append([]keybind{{"e", fmt.Sprintf("errors(%d)", m.scanErrTotal)}}, kb...)

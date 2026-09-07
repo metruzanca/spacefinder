@@ -52,7 +52,9 @@ Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` fo
 
 ## TODO
 
-For v0.1.0 I choose to not render small folders/files. I'm considering adding a vertical scroll to the pages to show every folder/file no matter how small.
+Directories with more entries than fit at a legible minimum size are split
+across pages (`tab` / `shift+tab`, or the arrow/wheel edges) so every file or
+folder, no matter how small, can be reached.
 
 Filters are another idea from [Spacesniffer][1] which would be useful: filter by file type, age, file size. Spacesniffer also net you tag files, which could be useful for filtering. And exporting a report could also be useful, though I've never used that feature from spacesniffer.
 

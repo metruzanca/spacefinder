@@ -52,6 +52,24 @@ locate bottlenecks and, if desired, delete them.
   core shortcuts at a glance and note that the mouse is supported.
 - Breadcrumbs at the top of the screen show the current location.
 
+## Paging
+
+A level with more children than can be shown at a legible minimum size is
+split into pages, turned with `tab` / `shift+tab` (or `pgup` / `pgdn`), so no
+directory entry is ever hidden away:
+
+- Each page is a full-screen treemap of that page's entries, ordered
+  largest-first; page 1 holds the biggest entries, the last page the smallest.
+- Every rendered tile is at least 3 rows tall and 6 columns wide, so its name
+  label always fits; a tile too small for that on the current page spills to
+  the next page (where it is re-laid out at the same floor).
+- Moving down or right past the page's last (bottom-right) tile — or up or
+  left past the first (top-left) tile — wraps to the neighbouring page, and
+  the mouse wheel behaves the same way at the page edges.
+- The status line shows `page X/Y` when a level spans more than one page.
+- Only zero-size entries are dropped entirely (surfaced as a hidden count);
+  everything else is reachable somewhere.
+
 ## Mouse
 
 Mouse cell motion is enabled on the alternate screen.
@@ -64,7 +82,8 @@ Mouse cell motion is enabled on the alternate screen.
   so a long-running app does not tie up the TUI; only launch failures surface
   as errors.
 - Right-click goes up a level.
-- The mouse wheel moves the selection up and down.
+- The mouse wheel moves the selection up and down (and, at a page's top or
+  bottom edge, turns the page).
 
 ## Deletion
 
@@ -116,12 +135,12 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
 - **Free-space gutter**: a gutter row (statfs free bytes on the partition)
   shows at the scan root only, capped to a few rows so the content map keeps
   the screen.
-- **Entry cap**: at most 200 blocks are laid out per level; anything beyond
-  folds into a single non-selectable "other" bucket.
+- **Minimum tile size + pages**: no entry is capped away; instead the level is
+  paginated so every rendered tile is at least 3 rows × 6 columns (legible name
+  label) and anything that would not fit on the current page moves to the next
+  one. See "Paging" above.
 - **Info row**: a single row below the breadcrumbs describes the current
-  selection (name, size, share, child counts); the bottom line is reserved for
-  keybinds, rendered on a black bar with white keys and neutral gray
-  descriptions.
-- **Hidden children**: entries too small to earn a meaningful tile (fewer than
-  4 cells) are neither rendered nor selectable, but their count is surfaced in
-  the info row.
+  selection (name, size, share) and, pinned to the right, the level's children
+  count, hidden (zero-size) count, and page number (`page X/Y`) when paged;
+  the bottom line is reserved for keybinds, rendered on a black bar with white
+  keys and neutral gray descriptions.

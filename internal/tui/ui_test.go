@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,9 +109,13 @@ func TestMoveSelNeighborSides(t *testing.T) {
 			}
 			m.sel = i
 			before := m.rects[i]
+			beforePage := m.page
 			m.moveSel(d.dx, d.dy)
 			if m.sel == i {
 				continue // legitimately nothing beyond on this side
+			}
+			if m.page != beforePage {
+				continue // wrapped to the neighbouring page
 			}
 			after := m.rects[m.sel]
 			switch {
@@ -183,10 +189,11 @@ func TestSelRestoresOnUp(t *testing.T) {
 	}
 }
 
-// TestInsignificantChildrenHidden verifies that children too small to earn a
-// tile are neither rendered nor selectable, and are surfaced through the
-// hidden count.
-func TestInsignificantChildrenHidden(t *testing.T) {
+// TestPagesReachAllChildren verifies that children too small to fit on the
+// first page are chunked onto later pages at a legible minimum size, and that
+// every non-zero child is reachable across the pages (nothing is silently
+// folded away except zero-size entries, which stay hidden).
+func TestPagesReachAllChildren(t *testing.T) {
 	m := newModel("/")
 	m.mode = modeBrowse
 	m.width, m.height = 40, 20
@@ -203,14 +210,35 @@ func TestInsignificantChildrenHidden(t *testing.T) {
 	m.current = m.tree
 	m.buildLayout()
 
-	if m.hidden != tinyCount {
-		t.Fatalf("hidden = %d, want %d", m.hidden, tinyCount)
+	if m.hidden != 0 {
+		t.Fatalf("hidden = %d, want 0 (only zero-size entries are dropped)", m.hidden)
 	}
-	// No rendered tile may refer to a tiny child.
-	for _, r := range m.rects {
-		if r.Index >= bigCount {
-			t.Fatalf("tiny child %d rendered as a tile", r.Index)
+	if m.pageCount < 2 {
+		t.Fatalf("pageCount = %d, want multiple pages for 105 children", m.pageCount)
+	}
+	// Every non-zero child is reachable across the pages, and no page renders a
+	// tile below the legibility floor.
+	w, h := m.treemapSize()
+	seen := map[int]bool{}
+	for p := 0; p < m.pageCount; p++ {
+		m.layoutPage(p, w, h)
+		for _, ci := range m.pageIdx {
+			if seen[ci] {
+				t.Fatalf("child %d appears on more than one page", ci)
+			}
+			seen[ci] = true
 		}
+		for _, r := range m.rects {
+			if r.Index < 0 {
+				continue
+			}
+			if r.W < minTileCols || r.H < minTileRows {
+				t.Fatalf("page %d has a tile below the floor: %#v", p, r)
+			}
+		}
+	}
+	if len(seen) != bigCount+tinyCount {
+		t.Fatalf("reachable children = %d, want %d", len(seen), bigCount+tinyCount)
 	}
 }
 
@@ -273,6 +301,145 @@ func TestHiddenCount(t *testing.T) {
 	m.buildLayout()
 	if m.hidden != 1 {
 		t.Fatalf("hidden = %d, want 1", m.hidden)
+	}
+}
+
+// multiPageModel builds a level with enough equal-sized children that several
+// pages of floored tiles are required.
+func multiPageModel() *Model {
+	m := newModel("/")
+	m.mode = modeBrowse
+	m.width, m.height = 80, 24
+	children := make([]*scan.Node, 0, 160)
+	for i := 0; i < 160; i++ {
+		children = append(children, &scan.Node{Name: fmt.Sprintf("f%03d", i), Path: "/", IsDir: false, Size: 1000})
+	}
+	m.tree = &scan.Node{Name: "fs", Path: "/", IsDir: true, Children: children}
+	m.current = m.tree
+	m.buildLayout()
+	return m
+}
+
+// selectChild navigates to the tile for the named child on whichever page it
+// sits, leaving the model laid out on that page.
+func selectChild(t *testing.T, m *Model, name string) {
+	t.Helper()
+	w, h := m.treemapSize()
+	for p := 0; p < m.pageCount; p++ {
+		m.layoutPage(p, w, h)
+		for ri := range m.rects {
+			idx := m.rects[ri].Index
+			if idx >= 0 && idx < len(m.pageIdx) && m.current.Children[m.pageIdx[idx]].Name == name {
+				m.sel = ri
+				return
+			}
+		}
+	}
+	t.Fatalf("child %q not found on any page", name)
+}
+
+func TestTabFlipsPages(t *testing.T) {
+	m := multiPageModel()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	if m.page != 0 {
+		t.Fatalf("initial page = %d, want 0", m.page)
+	}
+	got, _ := m.Update(keyType(tea.KeyTab))
+	m = got.(*Model)
+	if m.page != 1 {
+		t.Fatalf("tab left page %d, want 1", m.page)
+	}
+	if m.sel != firstSelectable(m.rects) {
+		t.Fatal("tab did not select the first tile of the new page")
+	}
+	// PgUp goes back; Shift+Tab also goes back.
+	got, _ = m.Update(keyType(tea.KeyPgUp))
+	m = got.(*Model)
+	if m.page != 0 {
+		t.Fatalf("pgup left page %d, want 0", m.page)
+	}
+	got, _ = m.Update(keyType(tea.KeyShiftTab))
+	m = got.(*Model)
+	if m.page != 0 {
+		t.Fatalf("shift+tab wrapped past the first page to %d", m.page)
+	}
+}
+
+func TestMoveSelWrapsPages(t *testing.T) {
+	m := multiPageModel()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	// Moving past the last tile flips forward.
+	m.sel = lastSelectable(m.rects)
+	before := m.page
+	m.moveSel(1, 0)
+	if m.page != before+1 {
+		t.Fatalf("right past the last tile: page %d, want %d", m.page, before+1)
+	}
+	if m.sel != firstSelectable(m.rects) {
+		t.Fatal("forward wrap did not land on the first tile")
+	}
+	// Moving past the first tile flips back.
+	m.sel = firstSelectable(m.rects)
+	before = m.page
+	m.moveSel(-1, 0)
+	if m.page != before-1 {
+		t.Fatalf("left past the first tile: page %d, want %d", m.page, before-1)
+	}
+	if m.sel != lastSelectable(m.rects) {
+		t.Fatal("backward wrap did not land on the last tile")
+	}
+	// Vertical moves wrap too.
+	m.sel = lastSelectable(m.rects)
+	before = m.page
+	m.moveSel(0, 1)
+	if m.page != before+1 {
+		t.Fatalf("down past the last tile: page %d, want %d", m.page, before+1)
+	}
+}
+
+func TestUpRestoresSelectionAcrossPages(t *testing.T) {
+	m := multiPageModel()
+	m.current.Children = append(m.current.Children, &scan.Node{Name: "zdir", Path: "/zdir", IsDir: true, Size: 1000})
+	m.buildLayout()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	selectChild(t, m, "zdir")
+	dirPage := m.page
+	if dirPage == 0 {
+		t.Skip("zdir landed on the first page; adjust the fixture")
+	}
+	got, _ := m.Update(keyType(tea.KeyEnter)) // drill into zdir
+	m = got.(*Model)
+	if m.current.Name != "zdir" {
+		t.Fatalf("current = %v, want zdir", m.current.Name)
+	}
+	got, _ = m.Update(keyType(tea.KeyEsc)) // back up
+	m = got.(*Model)
+	if m.page != dirPage {
+		t.Fatalf("after esc page = %d, want %d", m.page, dirPage)
+	}
+	if n := m.selectedNode(); n == nil || n.Name != "zdir" {
+		t.Fatalf("selection after esc = %#v, want zdir", n)
+	}
+}
+
+func TestPageIndicatorShown(t *testing.T) {
+	m := multiPageModel()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	if !strings.Contains(m.infoLine(), "page 1/"+strconv.Itoa(m.pageCount)) {
+		t.Fatalf("info line missing page indicator: %q", m.infoLine())
+	}
+	// A single-page level shows no indicator.
+	s := browseModel()
+	if strings.Contains(s.infoLine(), "page 1/1") {
+		t.Fatal("single-page level should not show a page indicator")
 	}
 }
 

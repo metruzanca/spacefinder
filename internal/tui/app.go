@@ -23,12 +23,19 @@ import (
 	"github.com/metruzanca/spacefinder/internal/treemap"
 )
 
-const maxRects = 200
+const maxRects = 0 // no cap: every non-empty entry is reachable across pages
 
-// minTileCells is the smallest footprint a directory may occupy in the
-// treemap before it is considered insignificant and folded into the (hidden,
-// non-selectable) "other" bucket instead of being rendered.
-const minTileCells = 4
+// Floor tile dimensions. Every rendered tile is at least minTileRows tall and
+// minTileCols wide, so its name label is legible (drawLabel needs ~3 rows and a
+// few columns). Sizes are guaranteed by paginating the level: children are
+// chunked into pages, each laid out over the full grid, so nothing ever falls
+// below the floor. A smaller tile's size line is omitted (name only).
+const minTileRows = 3
+const minTileCols = 6
+
+// minTileCells is the area equivalent of the floor, used by the single-screen
+// filesystem picker (LayoutWith folds too-small tiles into "other").
+const minTileCells = minTileRows * minTileCols
 
 type mode int
 
@@ -106,6 +113,19 @@ type Model struct {
 	tiles   []tileStyle
 	sel     int
 	hidden  int // children with a zero block size, dropped from the layout
+
+	// paging: children are chunked into full-screen pages so every non-empty
+	// entry gets a legible (floored) tile. ordered holds the layout-order
+	// (sorted descending) child indices with a positive size; pageStart are the
+	// boundaries of each page into ordered; pageIdx is the current page's
+	// ordered slice; pageOf maps a global child index to its page number;
+	// page/pageCount are the current and total page count.
+	page      int
+	pageCount int
+	ordered   []int
+	pageStart []int
+	pageIdx   []int
+	pageOf    []int
 
 	// free-space gutter (only shown at the scan root)
 	freeBytes int64
@@ -270,6 +290,14 @@ func (m *Model) buildPickerLayout() {
 	}
 	m.rects = treemap.LayoutWith(items, w, h, maxRects, minTileCells)
 	m.raster = treemap.Raster(m.rects, w, h)
+	// The picker is a single page; LayoutWith preserves input order, so each
+	// rect Index equals its position in pickerNodes.
+	m.page, m.pageCount = 0, 1
+	m.pageIdx = make([]int, len(children))
+	for i := range m.pageIdx {
+		m.pageIdx[i] = i
+	}
+	m.ordered, m.pageStart, m.pageOf = nil, nil, nil
 	m.tiles = make([]tileStyle, len(m.rects))
 	for i := range m.rects {
 		idx := m.rects[i].Index
@@ -747,6 +775,7 @@ func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
 	m.scanErrTotal = 0
 	m.errScroll = 0
 	m.sel = -1 // a fresh layout starts from the first tile, not the old picker position
+	m.page = 0
 	m.mode = modeSplash
 	m.start = time.Now()
 	logging.Debugf("tui root path: %s", path)
@@ -774,6 +803,14 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case msg.Type == tea.KeyEsc:
 		m.up()
+	case msg.Type == tea.KeyTab, msg.Type == tea.KeyPgDown:
+		if m.nextPage() {
+			m.sel = firstSelectable(m.rects)
+		}
+	case msg.Type == tea.KeyShiftTab, msg.Type == tea.KeyPgUp:
+		if m.prevPage() {
+			m.sel = lastSelectable(m.rects)
+		}
 	case msg.Type == tea.KeyUp, msg.String() == "k":
 		m.moveSel(0, -1)
 	case msg.Type == tea.KeyDown, msg.String() == "j":
@@ -919,6 +956,7 @@ func (m *Model) rescan() tea.Cmd {
 	m.crumbs = nil
 	m.pending = nil
 	m.sel = -1 // a fresh scan restarts the selection at the first tile
+	m.page = 0
 	m.scanErrors = nil
 	m.scanErrTotal = 0
 	m.errScroll = 0
@@ -971,18 +1009,28 @@ func (m *Model) up() {
 	m.current = m.crumbs[len(m.crumbs)-1]
 	m.crumbs = m.crumbs[:len(m.crumbs)-1]
 	m.buildLayout()
-	// Restore the selection to the rectangle that was previously drilled.
-	for ri := range m.rects {
-		idx := m.rects[ri].Index
-		if idx >= 0 && idx < len(m.current.Children) && m.current.Children[idx] == old {
-			m.sel = ri
-			return
+	// Restore the selection to the rectangle that was previously drilled, even
+	// when it sits on a later page of the parent.
+	for ci, c := range m.current.Children {
+		if c != old {
+			continue
+		}
+		if p := m.pageOf[ci]; p >= 0 && p < m.pageCount && p != m.page {
+			w, h := m.treemapSize()
+			m.layoutPage(p, w, h)
+		}
+		for ri := range m.rects {
+			idx := m.rects[ri].Index
+			if idx >= 0 && idx < len(m.pageIdx) && m.current.Children[m.pageIdx[idx]] == old {
+				m.sel = ri
+				return
+			}
 		}
 	}
 }
 
 // buildLayout sorts the current directory's children and re-computes the
-// treemap rectangles for the current terminal size.
+// treemap rectangles for the current page and terminal size.
 func (m *Model) buildLayout() {
 	if m.current == nil {
 		return
@@ -995,40 +1043,135 @@ func (m *Model) buildLayout() {
 		return children[i].Name < children[j].Name
 	})
 	w, h := m.treemapSize()
-	items := make([]treemap.Item, len(children))
+
+	// Non-empty children in layout order (global indices); zero-size children
+	// are never rendered and are counted as hidden.
+	ordered := make([]int, 0, len(children))
+	m.hidden = 0
 	for i, c := range children {
-		// sqrt-scaled area: monotonic and ranking-preserving, but a dominant
-		// folder no longer swamps the view, so small entries stay square-ish.
-		// Labels and status percentages keep the true byte counts.
+		if c.Size <= 0 {
+			m.hidden++
+			continue
+		}
+		ordered = append(ordered, i)
+	}
+	if len(ordered) == 0 {
+		m.page, m.pageCount = 0, 0
+		m.ordered, m.pageStart, m.pageOf, m.pageIdx = nil, nil, nil, nil
+		m.rects, m.raster, m.tiles = nil, nil, nil
+		return
+	}
+
+	// Chunk into pages, each keeping every tile at or above the legibility
+	// floor; pages are rebuilt whenever the layout is (resize, drill, delete).
+	m.buildPages(ordered, w, h, children)
+	if m.page < 0 || m.page >= m.pageCount {
+		m.page = 0
+	}
+	m.layoutPage(m.page, w, h)
+
+	if m.sel >= len(m.rects) {
+		m.sel = -1
+	}
+	if m.sel < 0 {
+		m.sel = firstSelectable(m.rects)
+	}
+}
+
+// buildPages partitions ordered (sorted-descending child indices) into pages.
+// A page is the longest contiguous run that can be laid out over the grid with
+// every tile at least minTileRows × minTileCols. Feasibility is monotonic in
+// the run length (adding smaller items can only shrink the smallest tile), so
+// the largest run is found with a binary search; a single-item page always
+// fills the grid and is thus always feasible.
+func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
+	n := len(ordered)
+	m.ordered = ordered
+	m.pageOf = make([]int, len(children))
+	for i := range m.pageOf {
+		m.pageOf[i] = -1
+	}
+	m.pageStart = make([]int, 0, n)
+	maxPage := (w * h) / (minTileRows * minTileCols)
+	if maxPage < 1 {
+		maxPage = 1
+	}
+	sizes := make([]int64, len(children))
+	for i, c := range children {
+		sizes[i] = c.Size
+	}
+	start := 0
+	for start < n {
+		m.pageStart = append(m.pageStart, start)
+		page := len(m.pageStart) - 1
+		lo, hi := start, min(start+maxPage, n)
+		best := start
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			if pageFeasible(ordered[start:mid], w, h, sizes) {
+				best = mid
+				lo = mid + 1
+			} else {
+				hi = mid - 1
+			}
+		}
+		if best == start {
+			best = start + 1 // degenerate tiny grid: still make progress
+		}
+		for i := start; i < best; i++ {
+			m.pageOf[ordered[i]] = page
+		}
+		start = best
+	}
+	m.pageStart = append(m.pageStart, n)
+	m.pageCount = len(m.pageStart) - 1
+}
+
+// pageFeasible reports whether laying the given items out over the grid keeps
+// every tile at or above the legibility floor. An empty page trivially does;
+// on a grid too small for the floor, the floor is waived.
+func pageFeasible(ids []int, w, h int, sizes []int64) bool {
+	if len(ids) == 0 {
+		return true
+	}
+	if w < minTileCols || h < minTileRows {
+		return true
+	}
+	items := make([]treemap.Item, len(ids))
+	for i, id := range ids {
+		items[i] = treemap.Item{Name: "", Size: layoutSize(sizes[id]), Selectable: true}
+	}
+	rs := treemap.Layout(items, w, h, maxRects)
+	for _, r := range rs {
+		if r.W < minTileCols || r.H < minTileRows {
+			return false
+		}
+	}
+	return true
+}
+
+// layoutPage lays page p of the current level out over the grid and fills the
+// rect/raster/tile buffers. rect Index refers to the position in the page's
+// item list, which resolves through m.pageIdx to a global child index.
+func (m *Model) layoutPage(p, w, h int) {
+	m.page = p
+	ids := m.ordered[m.pageStart[p]:m.pageStart[p+1]]
+	m.pageIdx = ids
+	items := make([]treemap.Item, len(ids))
+	for i, id := range ids {
+		c := m.current.Children[id]
 		items[i] = treemap.Item{Name: c.Name, Size: layoutSize(c.Size), Selectable: true}
 	}
-	m.rects = treemap.LayoutWith(items, w, h, maxRects, minTileCells)
+	m.rects = treemap.Layout(items, w, h, maxRects)
 	m.raster = treemap.Raster(m.rects, w, h)
-	// Precompute every tile's style set (per-child colour) and count the
-	// children that end up not rendered at all (zero-size or too small to
-	// matter): they are neither drawn nor selectable.
 	m.tiles = make([]tileStyle, len(m.rects))
-	rendered := make(map[int]bool, len(m.rects))
 	for i := range m.rects {
 		idx := m.rects[i].Index
 		if idx < 0 {
 			m.tiles[i] = otherStyle
 			continue
 		}
-		rendered[idx] = true
-		m.tiles[i] = styleFor(children[idx].Name)
-	}
-	m.hidden = 0
-	for i, c := range children {
-		if c.Size <= 0 || !rendered[i] {
-			m.hidden++
-		}
-	}
-	if m.sel >= len(m.rects) {
-		m.sel = -1
-	}
-	if m.sel < 0 {
-		m.sel = firstSelectable(m.rects)
+		m.tiles[i] = styleFor(m.current.Children[ids[idx]].Name)
 	}
 }
 
@@ -1082,10 +1225,10 @@ func (m *Model) selectedNode() *scan.Node {
 		return nil
 	}
 	idx := m.rects[m.sel].Index
-	if idx < 0 || idx >= len(m.current.Children) {
+	if idx < 0 || idx >= len(m.pageIdx) {
 		return nil
 	}
-	return m.current.Children[idx]
+	return m.current.Children[m.pageIdx[idx]]
 }
 
 func firstSelectable(rects []treemap.Rect) int {
@@ -1095,6 +1238,41 @@ func firstSelectable(rects []treemap.Rect) int {
 		}
 	}
 	return -1
+}
+
+// lastSelectable is the trailing real tile: the smallest, laid out last and
+// sitting in the bottom-right of the map. It anchors forward page wrapping.
+func lastSelectable(rects []treemap.Rect) int {
+	for i := len(rects) - 1; i >= 0; i-- {
+		if rects[i].Index >= 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// nextPage flips to the following page of the current level, relaying it out.
+// It reports whether a page existed to flip to. The caller decides the new
+// selection.
+func (m *Model) nextPage() bool {
+	if m.page >= m.pageCount-1 {
+		return false
+	}
+	w, h := m.treemapSize()
+	m.layoutPage(m.page+1, w, h)
+	return true
+}
+
+// prevPage flips to the previous page of the current level, relaying it out.
+// It reports whether a page existed to flip to. The caller decides the new
+// selection.
+func (m *Model) prevPage() bool {
+	if m.page <= 0 {
+		return false
+	}
+	w, h := m.treemapSize()
+	m.layoutPage(m.page-1, w, h)
+	return true
 }
 
 func isQuit(msg tea.KeyMsg) bool {
