@@ -81,12 +81,14 @@ func (m *Model) view() string {
 			m.drawModal(idxBuf, buf, w, h)
 		case m.mode == modeHelp:
 			m.drawHelp(idxBuf, buf, w, h)
+		case m.mode == modeErrors:
+			m.drawErrors(idxBuf, buf, w, h)
 		}
 	}
 
 	rows := []string{m.breadcrumbLine(), m.infoLine()}
 	switch {
-	case m.mode == modeConfirm, m.mode == modeHelp:
+	case m.mode == modeConfirm, m.mode == modeHelp, m.mode == modeErrors:
 		rows = append(rows, compose(m.tiles, idxBuf, buf, w, h, m.sel)...)
 	case len(m.rects) == 0:
 		rows = append(rows, centerRows(h, []string{
@@ -234,7 +236,7 @@ func (m *Model) drawModal(idxBuf [][]int, buf [][]rune, w, h int) {
 		text = append(text, "Name does not match.")
 		errLine = len(text) - 1
 	}
-	paintModal(idxBuf, buf, w, h, text, errLine)
+	paintModal(idxBuf, buf, w, h, text, errLine, true)
 }
 
 // drawHelp paints the keybind/mouse reference as a borderless, scrim-backed
@@ -261,6 +263,7 @@ func (m *Model) helpRows() []helpTableRow {
 		{left: "enter", right: "drill into a folder"},
 		{left: "esc", right: "go up a level"},
 		{left: "r", right: "rescan the current root"},
+		{left: "e", right: "show unreadable paths from the scan"},
 		{left: "del", right: "delete the selection (type its name to confirm)"},
 		{left: "q", right: "quit"},
 	}
@@ -279,6 +282,70 @@ func (m *Model) helpRows() []helpTableRow {
 		helpTableRow{},
 		helpTableRow{right: "esc, enter, or ? to close", footer: true},
 	)
+}
+
+// drawErrors paints the scan-errors modal as a bordered, left-aligned list of
+// wrapped "path: reason" lines. Each error is kept whole (never split mid-way)
+// and scrolled by errScroll; long lines wrap to the box width instead of being
+// truncated.
+func (m *Model) drawErrors(idxBuf [][]int, buf [][]rune, w, h int) {
+	body := m.scanErrors
+	if len(body) == 0 {
+		paintModal(idxBuf, buf, w, h, []string{
+			"SCAN ERRORS",
+			"no unreadable paths",
+			"press esc to close",
+		}, -1, true)
+		return
+	}
+	contentW := w - 4 // box borders + padding
+	if contentW < 12 {
+		contentW = w - 2
+	}
+	if contentW < 1 {
+		contentW = 1
+	}
+	wrapped := make([][]string, len(body))
+	for i, e := range body {
+		wrapped[i] = wrapText(e.Path+": "+e.Err.Error(), contentW)
+	}
+	// Rows inside the box: borders(2) + header(1) + up to two footer hints, so
+	// the box fits h with the footer still visible.
+	bodyFit := h - 5
+	if bodyFit < 1 {
+		bodyFit = 1
+	}
+	start := m.errScroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(body) {
+		start = len(body) - 1
+	}
+	// Show whole errors only: advance until the next error's wrapped lines
+	// would overflow the box.
+	end := start
+	used := 0
+	for end < len(body) {
+		if used+len(wrapped[end]) > bodyFit {
+			break
+		}
+		used += len(wrapped[end])
+		end++
+	}
+	if end == start {
+		end = start + 1 // a single error taller than the box still shows
+	}
+
+	text := []string{"UNREADABLE"}
+	for _, l := range wrapped[start:end] {
+		text = append(text, l...)
+	}
+	if shown := end - start; shown < m.scanErrTotal {
+		text = append(text, fmt.Sprintf("showing %d of %d · scroll for more", shown, m.scanErrTotal))
+	}
+	text = append(text, "esc close")
+	paintModal(idxBuf, buf, w, h, text, -1, false)
 }
 
 // paintTable draws a borderless two-column table on a scrim backdrop: the key
@@ -366,10 +433,11 @@ func paintTable(idxBuf [][]int, buf [][]rune, w, h int, rows []helpTableRow) {
 	}
 }
 
-// paintModal draws a centered message box over the frame: full-width scrim so
+// paintModal draws a message box over the frame: full-width scrim so
 // neighbouring labels do not bleed in, a bordered box, and the given text rows.
-// errLine marks one row to render in the error color (-1 for none).
-func paintModal(idxBuf [][]int, buf [][]rune, w, h int, text []string, errLine int) {
+// errLine marks one row to render in the error color (-1 for none). center
+// aligns each row horizontally; when false rows are left-aligned (for lists).
+func paintModal(idxBuf [][]int, buf [][]rune, w, h int, text []string, errLine int, center bool) {
 	boxW := 0
 	for _, l := range text {
 		if n := lipgloss.Width(l); n > boxW {
@@ -444,7 +512,10 @@ func paintModal(idxBuf [][]int, buf [][]rune, w, h int, text []string, errLine i
 		}
 		runes := []rune(truncate(line, boxW-2))
 		row := oy + 1 + i
-		start := ox + 1 + (boxW-2-len(runes))/2
+		start := ox + 1
+		if center {
+			start = ox + 1 + (boxW-2-len(runes))/2
+		}
 		idx := idxModalFG
 		if i == errLine {
 			idx = idxModalErr
@@ -574,6 +645,9 @@ func (m *Model) effectiveMode() mode {
 	if m.mode == modeHelp && m.helpFrom != 0 {
 		return m.helpFrom
 	}
+	if m.mode == modeErrors {
+		return modeBrowse // overlays the browser, not a distinct screen
+	}
 	return m.mode
 }
 
@@ -614,6 +688,17 @@ func (m *Model) infoLine() string {
 				right += fmt.Sprintf(" · %d hidden", m.hidden)
 			}
 		}
+		if m.current == m.tree && m.scanErrTotal > 0 {
+			err := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colErr)).
+				Bold(true).
+				Render(fmt.Sprintf("%d unreadable", m.scanErrTotal))
+			if right == "" {
+				right = err
+			} else {
+				right += " · " + err
+			}
+		}
 	}
 	// The right group (children/hidden) reflects the drilled directory, not the
 	// selection, so it is pinned to the right edge while the selection group
@@ -640,8 +725,8 @@ type keybind struct {
 }
 
 // helpLineBindings returns the shortcuts shown for the current mode.
-func helpLineBindings(mode mode) []keybind {
-	if mode == modePicker {
+func (m *Model) helpLineBindings() []keybind {
+	if m.effectiveMode() == modePicker {
 		return []keybind{
 			{"↑↓←→", "select"},
 			{"enter", "scan"},
@@ -649,13 +734,17 @@ func helpLineBindings(mode mode) []keybind {
 			{"q", "quit"},
 		}
 	}
-	return []keybind{
+	kb := []keybind{
 		{"click", "select"},
 		{"esc", "up"},
 		{"del", "delete"},
 		{"?", "help"},
 		{"q", "quit"},
 	}
+	if m.scanErrTotal > 0 {
+		kb = append([]keybind{{"e", fmt.Sprintf("errors(%d)", m.scanErrTotal)}}, kb...)
+	}
+	return kb
 }
 
 // helpLine is the bottom row of the screen: keybinds on a black bar, with the
@@ -680,7 +769,7 @@ func (m *Model) helpLine() string {
 		s string
 		w int
 	}
-	for i, h := range helpLineBindings(m.effectiveMode()) {
+	for i, h := range m.helpLineBindings() {
 		var b strings.Builder
 		if i > 0 {
 			b.WriteString(lbl.Render(" · "))

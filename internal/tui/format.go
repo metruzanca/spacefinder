@@ -177,6 +177,58 @@ func runeWidth(r rune) int {
 	return 1
 }
 
+// wrapText breaks s into lines of at most width terminal cells, preferring to
+// break on whitespace, then on path separators, and finally hard-breaking a
+// word that cannot fit. It never splits a rune, so long paths stay intact
+// (wrapped at "/") rather than being truncated.
+func wrapText(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	runes := []rune(s)
+	var out []string
+	for len(runes) > 0 {
+		if lipgloss.Width(string(runes)) <= width {
+			out = append(out, string(runes))
+			break
+		}
+		cells := 0
+		lastSpace := -1 // cut before this space (and drop it)
+		lastSlash := -1 // cut after this separator (keep it)
+		end := 0
+		for end < len(runes) {
+			w := runeWidth(runes[end])
+			if cells+w > width {
+				break
+			}
+			cells += w
+			switch runes[end] {
+			case ' ':
+				lastSpace = end
+			case '/':
+				lastSlash = end
+			}
+			end++
+		}
+		if end == 0 {
+			end = 1 // a rune wider than the box still gets its own line
+		}
+		switch {
+		case lastSpace >= 0:
+			out = append(out, string(runes[:lastSpace]))
+			runes = runes[lastSpace+1:]
+		case lastSlash >= 0:
+			cut := lastSlash + 1
+			out = append(out, string(runes[:cut]))
+			runes = runes[cut:]
+		default:
+			out = append(out, string(runes[:end]))
+			runes = runes[end:]
+		}
+	}
+	return out
+}
+
 // moveSel moves the selection one step in the given direction (+x right, +y
 // up). It navigates by block edges: candidates must lie strictly beyond the
 // current block in that axis, and the chosen one is the nearest such block

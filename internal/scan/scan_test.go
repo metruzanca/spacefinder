@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -301,5 +302,123 @@ func TestMeasureIgnoresMountLikeDirs(t *testing.T) {
 	}
 	if tree.Size != fileBlocks(t, filepath.Join(root, "a", "b")) {
 		t.Fatalf("size = %d, want %d", tree.Size, fileBlocks(t, filepath.Join(root, "a", "b")))
+	}
+}
+
+// unreadableDir chmods dir to 0o000 so a readdir fails, and restores it on
+// cleanup. It reports false when running as root, where permission bits are
+// bypassed and the test would be meaningless.
+func unreadableDir(t *testing.T, dir string) bool {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		return false
+	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	return true
+}
+
+func TestMeasureCollectsErrors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "ok.txt"), "x")
+	secret := filepath.Join(root, "secret")
+	if err := os.Mkdir(secret, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(secret, "locked.txt"), "y")
+	if !unreadableDir(t, secret) {
+		t.Skip("running as root; permission checks are bypassed")
+	}
+
+	sc, _, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.TotalErrors() != 1 {
+		t.Fatalf("TotalErrors = %d, want 1", sc.TotalErrors())
+	}
+	errs := sc.Errors()
+	if len(errs) != 1 {
+		t.Fatalf("Errors = %d entries, want 1", len(errs))
+	}
+	if errs[0].Path != secret {
+		t.Fatalf("error path = %q, want %q", errs[0].Path, secret)
+	}
+	if errs[0].Err == nil {
+		t.Fatal("error reason is nil")
+	}
+}
+
+func TestExpandKeepsErrors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub", "x.txt"), "x")
+	secret := filepath.Join(root, "secret")
+	if err := os.Mkdir(secret, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(secret, "locked.txt"), "y")
+	if !unreadableDir(t, secret) {
+		t.Skip("running as root; permission checks are bypassed")
+	}
+
+	sc, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.TotalErrors() != 1 {
+		t.Fatalf("TotalErrors after measure = %d, want 1", sc.TotalErrors())
+	}
+	// A later expand must not clear the recorded errors.
+	var sub *Node
+	for _, c := range tree.Children {
+		if c.Name == "sub" {
+			sub = c
+		}
+	}
+	if err := sc.Expand(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	if sc.TotalErrors() != 1 {
+		t.Fatalf("TotalErrors after expand = %d, want 1", sc.TotalErrors())
+	}
+	found := false
+	for _, e := range sc.Errors() {
+		if e.Path == secret {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("error for %q not recorded; got %#v", secret, sc.Errors())
+	}
+}
+
+func TestErrorsSampleCapped(t *testing.T) {
+	root := t.TempDir()
+	// Many sibling unreadable dirs each contribute one readdir error, far
+	// exceeding the display cap while the true total is preserved.
+	const n = maxStoredErrors + 20
+	unreadable := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		d := filepath.Join(root, fmt.Sprintf("secret%d", i))
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !unreadableDir(t, d) {
+			t.Skip("running as root; permission checks are bypassed")
+		}
+		unreadable = append(unreadable, d)
+	}
+
+	sc, _, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sc.Errors()); got != maxStoredErrors {
+		t.Fatalf("stored %d errors, want the cap %d", got, maxStoredErrors)
+	}
+	if sc.TotalErrors() != n {
+		t.Fatalf("TotalErrors = %d, want %d", sc.TotalErrors(), n)
 	}
 }

@@ -47,6 +47,41 @@ type Node struct {
 type Scanner struct {
 	totals map[string]int64
 	seen   map[fileID]struct{}
+
+	errors   []ScanError
+	errTotal int
+}
+
+// ScanError records one filesystem entry that could not be read during a
+// measure pass or a later expand. These are tolerated (they never fail a
+// scan) but are surfaced so the user can see what was skipped.
+type ScanError struct {
+	Path string
+	Err  error
+}
+
+// maxStoredErrors caps how many error paths are retained for display. The
+// true total is always counted even when the sample is truncated.
+const maxStoredErrors = 100
+
+// recordError notes a path that could not be read.
+func (s *Scanner) recordError(path string, err error) {
+	s.errTotal++
+	if len(s.errors) < maxStoredErrors {
+		s.errors = append(s.errors, ScanError{Path: path, Err: err})
+	}
+}
+
+// Errors returns the sampled unreadable paths (capped at maxStoredErrors) in
+// the order they were hit; TotalErrors reports the true count.
+func (s *Scanner) Errors() []ScanError {
+	return s.errors
+}
+
+// TotalErrors is the number of entries that could not be read across the
+// measure pass and any expands, regardless of the stored sample size.
+func (s *Scanner) TotalErrors() int {
+	return s.errTotal
 }
 
 // fileID identifies an inode for hardlink dedup.
@@ -98,6 +133,7 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 	}
 	entries, err := os.ReadDir(node.Path)
 	if err != nil {
+		s.recordError(node.Path, err)
 		node.Children = []*Node{} // non-nil marks the directory as expanded
 		return nil
 	}
@@ -182,6 +218,7 @@ func (s *Scanner) measureDir(ctx context.Context, path string, info fs.FileInfo,
 func (s *Scanner) measureEntries(ctx context.Context, path string, parentDev uint64, th *throttle) (int64, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
+		s.recordError(path, err)
 		th.report(0, 1, path)
 		return -1, nil
 	}
@@ -193,6 +230,7 @@ func (s *Scanner) measureEntries(ctx context.Context, path string, parentDev uin
 		full := filepath.Join(path, e.Name())
 		stat, serr := e.Info()
 		if serr != nil {
+			s.recordError(full, serr)
 			th.report(0, 1, full)
 			continue
 		}

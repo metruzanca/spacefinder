@@ -40,6 +40,7 @@ const (
 	modeError
 	modePicker
 	modeHelp
+	modeErrors
 )
 
 type scanDoneMsg struct {
@@ -117,6 +118,11 @@ type Model struct {
 	confirmNode *scan.Node
 	input       textinput.Model
 	confirmErr  bool
+
+	// scan errors surfaced after the measure (modeErrors shows the full list)
+	scanErrors   []scan.ScanError
+	scanErrTotal int
+	errScroll    int
 
 	// filesystem picker (modePicker, shown when spacefinder runs without a path)
 	pickerNodes []*scan.Node          // one equal-area tile per scan target
@@ -468,6 +474,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // the modal swallows mouse input
 		case modePicker:
 			return m.updatePickerMouse(msg)
+		case modeErrors:
+			return m.updateErrorsMouse(msg)
 		}
 		return m.updateMouse(msg)
 
@@ -501,6 +509,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.crumbs = append(m.crumbs, m.current)
 		m.current = msg.node
 		m.mode = modeBrowse
+		m.refreshScanErrors() // the expand may have hit fresh unreadable paths
 		m.buildLayout()
 		return m, nil
 
@@ -538,6 +547,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = msg.root
 		m.crumbs = nil
 		m.freeBytes = freeOn(m.rootPath)
+		m.refreshScanErrors()
 		m.mode = modeBrowse
 		m.buildLayout()
 		return m, nil
@@ -552,6 +562,18 @@ func freeOn(path string) int64 {
 		return n
 	}
 	return 0
+}
+
+// refreshScanErrors pulls the unreadable-path sample off the scanner so the
+// browse view can report, and on 'e' show, what the scan could not read.
+func (m *Model) refreshScanErrors() {
+	if m.scanner == nil {
+		m.scanErrors = nil
+		m.scanErrTotal = 0
+		return
+	}
+	m.scanErrors = m.scanner.Errors()
+	m.scanErrTotal = m.scanner.TotalErrors()
 }
 
 func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -575,6 +597,8 @@ func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case modeConfirm:
 		return m.updateConfirm(msg)
+	case modeErrors:
+		return m.updateErrors(msg)
 	case modeBrowse:
 		return m.updateBrowse(msg)
 	}
@@ -663,6 +687,49 @@ func (m *Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateErrors handles keys while the scan-errors modal is open: j/k (or
+// arrows) scroll the list, esc/e/enter close it back to the browser, q (or
+// ctrl+c) quits.
+func (m *Model) updateErrors(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case isQuit(msg):
+		return m.quit()
+	case msg.Type == tea.KeyEsc, msg.String() == "e", msg.Type == tea.KeyEnter:
+		m.mode = modeBrowse
+		return m, nil
+	case msg.Type == tea.KeyUp, msg.String() == "k":
+		m.scrollErrors(-1)
+	case msg.Type == tea.KeyDown, msg.String() == "j":
+		m.scrollErrors(1)
+	}
+	return m, nil
+}
+
+// updateErrorsMouse scrolls the errors modal with the wheel; a click anywhere
+// on the scrim is ignored (it would only land on the dimmed treemap behind).
+func (m *Model) updateErrorsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.scrollErrors(-1)
+	case tea.MouseButtonWheelDown:
+		m.scrollErrors(1)
+	}
+	return m, nil
+}
+
+// scrollErrors moves the errors-modal viewport by delta lines, clamped to the
+// stored sample.
+func (m *Model) scrollErrors(delta int) {
+	m.errScroll += delta
+	if m.errScroll < 0 || len(m.scanErrors) == 0 {
+		m.errScroll = 0
+		return
+	}
+	if last := len(m.scanErrors) - 1; m.errScroll > last {
+		m.errScroll = last
+	}
+}
+
 // beginScan points the model at path and starts measuring it, transitioning
 // through the splash screen. Used by the picker after a selection.
 func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
@@ -676,6 +743,9 @@ func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
 	m.crumbs = nil
 	m.pending = nil
 	m.freeBytes = 0
+	m.scanErrors = nil
+	m.scanErrTotal = 0
+	m.errScroll = 0
 	m.sel = -1 // a fresh layout starts from the first tile, not the old picker position
 	m.mode = modeSplash
 	m.start = time.Now()
@@ -696,6 +766,12 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.drill()
 	case msg.String() == "r":
 		return m, m.rescan()
+	case msg.String() == "e":
+		if m.scanErrTotal > 0 {
+			m.mode = modeErrors
+			m.errScroll = 0
+			return m, nil
+		}
 	case msg.Type == tea.KeyEsc:
 		m.up()
 	case msg.Type == tea.KeyUp, msg.String() == "k":
@@ -843,6 +919,9 @@ func (m *Model) rescan() tea.Cmd {
 	m.crumbs = nil
 	m.pending = nil
 	m.sel = -1 // a fresh scan restarts the selection at the first tile
+	m.scanErrors = nil
+	m.scanErrTotal = 0
+	m.errScroll = 0
 	return tea.Batch(m.spinner.Tick, m.startScan(m.scanGen), m.progressCmd())
 }
 
