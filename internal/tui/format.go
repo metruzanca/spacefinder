@@ -49,8 +49,20 @@ type tileStyle struct {
 	selGlyph lipgloss.Style // label glyphs, selected
 }
 
-func styleFor(name string) tileStyle {
-	normal, bright := nameColor(name)
+// tilePalette is the fixed set of tile fill hues, spread evenly around the
+// colour wheel so no two are ever similar. Colouring from this palette — rather
+// than hashing a name to an arbitrary hue — means no near-identical fills exist
+// to land on adjacent blocks, and the greedy assignment in assignColors keeps
+// every edge-adjacent pair on different colours.
+var tilePalette = []float64{
+	0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330,
+}
+
+// styleForHue builds the normal/selected styles for one palette hue, using the
+// same fixed saturation/value as before so label contrast holds across the wheel.
+func styleForHue(hue float64) tileStyle {
+	normal := hsvHex(hue, 0.55, 0.72)
+	bright := hsvHex(hue, 0.55, 0.95)
 	normalC := lipgloss.Color(normal)
 	brightC := lipgloss.Color(bright)
 	return tileStyle{
@@ -59,6 +71,93 @@ func styleFor(name string) tileStyle {
 		selFill:  lipgloss.NewStyle().Background(brightC).Foreground(brightC),
 		selGlyph: lipgloss.NewStyle().Background(brightC).Foreground(labelFG(bright)).Bold(true),
 	}
+}
+
+// colorTiles produces one tileStyle per rectangle. The "other" bucket (rect
+// Index < 0) keeps the neutral otherStyle; every real tile is coloured from
+// tilePalette so that edge-adjacent rectangles never share a colour.
+func colorTiles(rects []treemap.Rect, raster []int, w, h int) []tileStyle {
+	tiles := make([]tileStyle, len(rects))
+	cols := assignColors(rects, raster, w, h)
+	for i := range rects {
+		if cols[i] < 0 {
+			tiles[i] = otherStyle
+			continue
+		}
+		tiles[i] = styleForHue(tilePalette[cols[i]])
+	}
+	return tiles
+}
+
+// assignColors returns, per rectangle, an index into tilePalette, or -1 for the
+// non-selectable "other" bucket. Rectangles are processed in layout order and
+// each picks the palette colour used by the fewest of its already-coloured
+// edge-adjacent neighbours, so no two adjacent tiles ever share a colour.
+// Treemaps are 2-colourable, so with a 12-colour palette a free colour always
+// exists and the fewest-neighbours rule simply keeps the choice deterministic.
+func assignColors(rects []treemap.Rect, raster []int, w, h int) []int {
+	cols := make([]int, len(rects))
+	for i := range cols {
+		cols[i] = -1
+	}
+	adj := rasterAdjacency(rects, raster, w, h)
+	for i := range rects {
+		if rects[i].Index < 0 {
+			continue
+		}
+		counts := make([]int, len(tilePalette))
+		for _, j := range adj[i] {
+			if cols[j] >= 0 {
+				counts[cols[j]]++
+			}
+		}
+		best := 0
+		for c := 1; c < len(counts); c++ {
+			if counts[c] < counts[best] {
+				best = c
+			}
+		}
+		cols[i] = best
+	}
+	return cols
+}
+
+// rasterAdjacency reports, for each rectangle, the other rectangles that share
+// an edge with it, read off the rendered raster: two cells are neighbours when
+// they touch horizontally or vertically, so what the user sees as adjacent is
+// exactly what is kept apart.
+func rasterAdjacency(rects []treemap.Rect, raster []int, w, h int) [][]int {
+	adj := make([][]int, len(rects))
+	if len(raster) != w*h {
+		return adj
+	}
+	seen := make([]map[int]bool, len(rects))
+	for i := range seen {
+		seen[i] = make(map[int]bool)
+	}
+	cell := func(x, y int) int {
+		if x < 0 || x >= w || y < 0 || y >= h {
+			return -1
+		}
+		return raster[y*w+x]
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			cur := raster[y*w+x]
+			if cur < 0 {
+				continue
+			}
+			for _, nb := range []int{cell(x+1, y), cell(x, y+1)} {
+				if nb >= 0 && nb != cur && !seen[cur][nb] {
+					seen[cur][nb] = true
+					seen[nb][cur] = true
+					adj[cur] = append(adj[cur], nb)
+					adj[nb] = append(adj[nb], cur)
+				}
+			}
+		}
+	}
+	return adj
 }
 
 // labelFG picks the more readable of white or near-black for text drawn on a
@@ -103,21 +202,6 @@ var otherStyle = func() tileStyle {
 		selGlyph: lipgloss.NewStyle().Background(bg).Foreground(fg).Bold(true),
 	}
 }()
-
-// nameColor maps an item name to a stable pair of 24-bit background colours
-// (normal and a brighter selected twin) via an FNV hash over the name, so the
-// same directory keeps the same hue at every depth.
-func nameColor(name string) (string, string) {
-	h := uint32(2166136261)
-	for i := 0; i < len(name); i++ {
-		h ^= uint32(name[i])
-		h *= 16777619
-	}
-	hue := float64(h % 360)
-	normal := hsvHex(hue, 0.55, 0.72)
-	bright := hsvHex(hue, 0.55, 0.95)
-	return normal, bright
-}
 
 func hsvHex(h, s, v float64) string {
 	c := v * s

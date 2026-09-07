@@ -134,6 +134,11 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
   hairlines; labels and percentages always show real block counts.
 - **Edge-to-edge blocks**: blocks fill the whole area without borders; the
   selection is the only outlined block (accent box).
+- **Adjacency-distinct colours**: tiles are coloured from a fixed palette of
+  hues spread evenly around the colour wheel (no two palette colours are ever
+  similar), and each tile is assigned the colour used by the fewest of its
+  edge-adjacent neighbours — so two blocks sharing a border never render the
+  same or a near-identical colour, keeping neighbouring tiles distinguishable.
 - **Navigation by block edges**: arrow and wheel navigation moves by block
   edges — the chosen neighbour is the nearest block strictly beyond the
   current one in the pressed direction, best aligned across the other axis.

@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/metruzanca/spacefinder/internal/scan"
+	"github.com/metruzanca/spacefinder/internal/treemap"
 )
 
 func TestStatusLineFitsWidth(t *testing.T) {
@@ -277,21 +278,50 @@ func bestContrast(hex string) float64 {
 	return dark
 }
 
-func TestNameHueStable(t *testing.T) {
-	a1, _ := nameColor("node_modules")
-	a2, _ := nameColor("node_modules")
-	if a1 != a2 {
-		t.Fatalf("nameColor not stable: %s vs %s", a1, a2)
+// TestPaletteDistinct asserts the palette holds no near-duplicate colours: hues
+// are spread evenly (≥30° apart) and each renders a unique fill, so two tiles
+// can only look the same when they are not adjacent.
+func TestPaletteDistinct(t *testing.T) {
+	for i := 1; i < len(tilePalette); i++ {
+		if d := tilePalette[i] - tilePalette[i-1]; d < 30 {
+			t.Fatalf("palette hues too close together: %v", tilePalette)
+		}
 	}
-	// A sample of distinct names should spread across the hue circle.
-	names := []string{"dev", "downloads", ".cache", "Documents", "Pictures", "go", ".local"}
 	seen := map[string]bool{}
-	for _, n := range names {
-		c, _ := nameColor(n)
-		seen[c] = true
+	for _, hue := range tilePalette {
+		seen[hsvHex(hue, 0.55, 0.72)] = true
 	}
-	if len(seen) < 3 {
-		t.Fatalf("expected distinct hues, got %d shared colours", len(seen))
+	if len(seen) != len(tilePalette) {
+		t.Fatalf("palette produced %d distinct fills from %d hues", len(seen), len(tilePalette))
+	}
+}
+
+// TestAdjacentTilesDistinct builds a layout of three mutually edge-adjacent
+// rectangles and asserts assignColors gives each a different palette colour, so
+// no two tiles the user sees side by side ever blend together.
+func TestAdjacentTilesDistinct(t *testing.T) {
+	rects := []treemap.Rect{
+		{Index: 0, X: 0, Y: 0, W: 5, H: 3},
+		{Index: 1, X: 5, Y: 0, W: 5, H: 3},
+		{Index: 2, X: 0, Y: 3, W: 10, H: 3},
+	}
+	const w, h = 10, 6
+	cols := assignColors(rects, treemap.Raster(rects, w, h), w, h)
+	for i := range cols {
+		if cols[i] < 0 {
+			t.Fatalf("real rect %d got the 'other' bucket colour", i)
+		}
+	}
+	if cols[0] == cols[1] || cols[0] == cols[2] || cols[1] == cols[2] {
+		t.Fatalf("mutually adjacent rects share colours: %v", cols)
+	}
+
+	// The "other" bucket never takes a palette colour and never forces one on
+	// its neighbours.
+	rects = append(rects, treemap.Rect{Index: -1, X: 0, Y: 6, W: 10, H: 3})
+	cols = assignColors(rects, treemap.Raster(rects, w, 9), w, 9)
+	if cols[3] != -1 {
+		t.Fatalf("other bucket colour = %d, want -1", cols[3])
 	}
 }
 

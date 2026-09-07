@@ -345,15 +345,7 @@ func (m *Model) buildPickerLayout() {
 		m.pageIdx[i] = i
 	}
 	m.ordered, m.pageStart, m.pageOf = nil, nil, nil
-	m.tiles = make([]tileStyle, len(m.rects))
-	for i := range m.rects {
-		idx := m.rects[i].Index
-		if idx < 0 {
-			m.tiles[i] = otherStyle
-			continue
-		}
-		m.tiles[i] = styleFor(children[idx].Name)
-	}
+	m.tiles = colorTiles(m.rects, m.raster, w, h)
 	if m.sel >= len(m.rects) {
 		m.sel = -1
 	}
@@ -1282,15 +1274,7 @@ func (m *Model) layoutPage(p, w, h int) {
 	}
 	m.rects = treemap.LayoutFixed(items, w, h, m.pageScale, m.pageMin[p])
 	m.raster = treemap.Raster(m.rects, w, h)
-	m.tiles = make([]tileStyle, len(m.rects))
-	for i := range m.rects {
-		idx := m.rects[i].Index
-		if idx < 0 {
-			m.tiles[i] = otherStyle
-			continue
-		}
-		m.tiles[i] = styleFor(m.current.Children[ids[idx]].Name)
-	}
+	m.tiles = colorTiles(m.rects, m.raster, w, h)
 }
 
 // addScanChildren grows the animation tree with the root children whose sizes
@@ -1363,15 +1347,7 @@ func (m *Model) buildScanLayout() {
 	m.page, m.pageCount = 0, 1
 	m.pageIdx = ordered
 	m.ordered, m.pageStart, m.pageOf = nil, nil, nil
-	m.tiles = make([]tileStyle, len(m.rects))
-	for i := range m.rects {
-		idx := m.rects[i].Index
-		if idx < 0 {
-			m.tiles[i] = otherStyle
-			continue
-		}
-		m.tiles[i] = styleFor(children[ordered[idx]].Name)
-	}
+	m.tiles = colorTiles(m.rects, m.raster, w, h)
 	if m.sel >= len(m.rects) {
 		m.sel = -1
 	}
