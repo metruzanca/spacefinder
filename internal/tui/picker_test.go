@@ -72,8 +72,8 @@ func TestPickerEnterStartsScan(t *testing.T) {
 	want := m.selectedPickerNode().Path
 	got, cmd := m.Update(keyType(tea.KeyEnter))
 	mm := got.(*Model)
-	if mm.mode != modeSplash {
-		t.Fatalf("mode = %v, want modeSplash after picking %s", mm.mode, want)
+	if mm.mode != modeScanning {
+		t.Fatalf("mode = %v, want modeScanning after picking %s", mm.mode, want)
 	}
 	if mm.rootPath != want {
 		t.Fatalf("rootPath = %q, want %q", mm.rootPath, want)
@@ -225,7 +225,7 @@ func TestPickerMouseSelectStartsScan(t *testing.T) {
 	m.lastClick = time.Now()
 	got, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: cx, Y: cy + 1})
 	mm := got.(*Model)
-	if mm.mode != modeSplash {
+	if mm.mode != modeScanning {
 		t.Fatalf("double-click did not start the scan; mode = %v", mm.mode)
 	}
 	if mm.rootPath != want {

@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/harmonica"
 	"github.com/mattn/go-isatty"
 
 	"github.com/metruzanca/spacefinder/internal/logging"
@@ -52,7 +53,7 @@ const minTileCells = minTileArea
 type mode int
 
 const (
-	modeSplash mode = iota
+	modeScanning mode = iota
 	modeMeasuring
 	modeBrowse
 	modeConfirm
@@ -96,6 +97,28 @@ type cwdSizeMsg struct {
 
 type scanProgressMsg scan.Progress
 
+// scanFrameMsg ticks the growth animation forward at a fixed rate. Each frame
+// eases every completed block's size toward its real value with a harmonica
+// spring, so the treemap visibly builds out as the walk explores the folder.
+type scanFrameMsg time.Time
+
+// Spring character for the block-growth animation: near-critical damping, so
+// tiles grow to size with a smooth settle and no overshoot bounce.
+const (
+	scanFPS        = 30
+	scanFrequency  = 6.0
+	scanDamping    = 0.8
+	scanSettleEps  = 0.05
+	scanInitialPos = 1 // new blocks start as a sliver and grow in
+)
+
+// scanSpring is the animation state of one completed root child: its eased
+// layout size (pos) is driven toward the child's real layout size (target).
+type scanSpring struct {
+	pos, vel float64
+	target   float64
+}
+
 // Model is the bubbletea model for spacefinder.
 type Model struct {
 	rootPath string
@@ -114,6 +137,15 @@ type Model struct {
 	scanner    *scan.Scanner
 	tree       *scan.Node
 	pending    *scan.Node // directory being expanded on demand (modeMeasuring)
+
+	// scan animation: the treemap builds out block by block as root children
+	// complete. scanRoot is a synthetic root whose Children grow with each
+	// progress event; scanSprings eases each child's layout size from a sliver
+	// to its real value. scanTicking tracks whether a frame ticker is armed.
+	scanRoot    *scan.Node
+	scanSprings []scanSpring
+	scanSpring  harmonica.Spring
+	scanTicking bool
 
 	// browse state
 	current *scan.Node
@@ -183,7 +215,7 @@ func newModel(rootPath string) *Model {
 	input.Width = 36
 	m := &Model{
 		rootPath:   filepath.Clean(abs),
-		mode:       modeSplash,
+		mode:       modeScanning,
 		start:      time.Now(),
 		spinner:    sp,
 		input:      input,
@@ -191,6 +223,7 @@ func newModel(rootPath string) *Model {
 		width:      80,
 		height:     24,
 		progressCh: make(chan scan.Progress, 128),
+		scanSpring: harmonica.NewSpring(harmonica.FPS(scanFPS), scanFrequency, scanDamping),
 	}
 	if rootPath == "" {
 		m.rootPath = ""
@@ -508,6 +541,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBrowse && m.current != nil {
 			m.buildLayout()
 		}
+		if m.mode == modeScanning && len(m.scanSprings) > 0 {
+			m.buildScanLayout()
+		}
 		return m, nil
 
 	case tea.MouseMsg:
@@ -525,7 +561,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKeys(msg)
 
 	case spinner.TickMsg:
-		if m.mode == modeSplash || m.mode == modeMeasuring {
+		if m.mode == modeScanning || m.mode == modeMeasuring {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -534,9 +570,27 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanProgressMsg:
 		m.progress = scan.Progress(msg)
+		var anim tea.Cmd
+		if m.mode == modeScanning && len(msg.Completed) > 0 {
+			m.addScanChildren(msg.Completed)
+			anim = m.armScanTicker()
+		}
 		// Re-arm the consumer so the drain loop keeps running; otherwise the
 		// scan's progress channel fills and the measure goroutine blocks.
-		return m, m.progressCmd()
+		return m, tea.Batch(anim, m.progressCmd())
+
+	case scanFrameMsg:
+		if m.mode != modeScanning {
+			m.scanTicking = false
+			return m, nil
+		}
+		moving := m.stepScanSprings()
+		m.buildScanLayout()
+		if moving {
+			return m, m.scanFrameCmd()
+		}
+		m.scanTicking = false
+		return m, nil
 
 	case expandDoneMsg:
 		if msg.node != m.pending {
@@ -590,6 +644,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.crumbs = nil
 		m.freeBytes = freeOn(m.rootPath)
 		m.refreshScanErrors()
+		// Drop the animation scaffolding; the browse layout takes over.
+		m.scanRoot = nil
+		m.scanSprings = nil
+		m.scanTicking = false
 		m.mode = modeBrowse
 		m.buildLayout()
 		return m, nil
@@ -620,7 +678,7 @@ func (m *Model) refreshScanErrors() {
 
 func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case modeSplash, modeError:
+	case modeScanning, modeError:
 		if isQuit(msg) {
 			return m.quit()
 		}
@@ -790,7 +848,10 @@ func (m *Model) beginScan(path string) (tea.Model, tea.Cmd) {
 	m.errScroll = 0
 	m.sel = -1 // a fresh layout starts from the first tile, not the old picker position
 	m.page = 0
-	m.mode = modeSplash
+	m.scanRoot = nil
+	m.scanSprings = nil
+	m.scanTicking = false
+	m.mode = modeScanning
 	m.start = time.Now()
 	logging.Debugf("tui root path: %s", path)
 	return m, tea.Batch(m.spinner.Tick, m.startScan(0), m.progressCmd())
@@ -963,7 +1024,7 @@ func (m *Model) rescan() tea.Cmd {
 	m.scanGen++
 	m.progress = scan.Progress{}
 	m.progressCh = make(chan scan.Progress, 128)
-	m.mode = modeSplash
+	m.mode = modeScanning
 	m.scanner = nil
 	m.tree = nil
 	m.current = nil
@@ -971,6 +1032,9 @@ func (m *Model) rescan() tea.Cmd {
 	m.pending = nil
 	m.sel = -1 // a fresh scan restarts the selection at the first tile
 	m.page = 0
+	m.scanRoot = nil
+	m.scanSprings = nil
+	m.scanTicking = false
 	m.scanErrors = nil
 	m.scanErrTotal = 0
 	m.errScroll = 0
@@ -1227,6 +1291,153 @@ func (m *Model) layoutPage(p, w, h int) {
 		}
 		m.tiles[i] = styleFor(m.current.Children[ids[idx]].Name)
 	}
+}
+
+// addScanChildren grows the animation tree with the root children whose sizes
+// completed since the last event. Each new block starts as a sliver (its spring
+// eases it up to the real size), so the map builds out in exploration order.
+func (m *Model) addScanChildren(completed []scan.ChildSize) {
+	if m.scanRoot == nil {
+		m.scanRoot = &scan.Node{Name: m.rootPath, Path: m.rootPath, IsDir: true}
+	}
+	for _, cs := range completed {
+		n := &scan.Node{
+			Name: cs.Name,
+			Path: filepath.Join(m.rootPath, cs.Name),
+			Size: cs.Size,
+		}
+		m.scanRoot.Children = append(m.scanRoot.Children, n)
+		m.scanSprings = append(m.scanSprings, scanSpring{
+			pos:    scanInitialPos,
+			vel:    0,
+			target: float64(layoutSize(cs.Size)),
+		})
+	}
+	m.current = m.scanRoot
+	m.tree = m.scanRoot
+	m.buildScanLayout()
+}
+
+// buildScanLayout lays the completed children out at a scale that fills the
+// grid, so the first completed block occupies the whole screen and each later
+// one takes its proportional share. Tiles are eased (spring) sizes, no area
+// floor, so new blocks grow smoothly from a sliver instead of snapping in.
+//
+// LayoutFixed sorts items by size and rect.Index is the position in that
+// sorted list, so items are passed already sorted (the same invariant the
+// browse layout relies on). ordered maps a sorted position back to a
+// scanChildren index; it doubles as pageIdx so frame/selectedNode resolve
+// rects to the right child.
+func (m *Model) buildScanLayout() {
+	children := m.scanChildren()
+	w, h := m.treemapSize()
+	if len(children) == 0 {
+		m.page, m.pageCount = 0, 0
+		m.pageIdx = nil
+		m.rects, m.raster, m.tiles = nil, nil, nil
+		m.sel = -1
+		return
+	}
+	ordered := make([]int, len(children))
+	for i := range ordered {
+		ordered[i] = i
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return m.scanSprings[ordered[i]].pos > m.scanSprings[ordered[j]].pos
+	})
+	items := make([]treemap.Item, len(children))
+	var total float64
+	for k, ci := range ordered {
+		size := m.scanSprings[ci].pos
+		if size < 1 {
+			size = 1
+		}
+		items[k] = treemap.Item{Name: children[ci].Name, Size: int64(math.Ceil(size)), Selectable: true}
+		total += size
+	}
+	scale := float64(w*h) / total
+	m.rects = treemap.LayoutFixed(items, w, h, scale, 0)
+	m.raster = treemap.Raster(m.rects, w, h)
+	// A single page; rect Index equals the position in ordered, which maps to
+	// the matching scan child.
+	m.page, m.pageCount = 0, 1
+	m.pageIdx = ordered
+	m.ordered, m.pageStart, m.pageOf = nil, nil, nil
+	m.tiles = make([]tileStyle, len(m.rects))
+	for i := range m.rects {
+		idx := m.rects[i].Index
+		if idx < 0 {
+			m.tiles[i] = otherStyle
+			continue
+		}
+		m.tiles[i] = styleFor(children[ordered[idx]].Name)
+	}
+	if m.sel >= len(m.rects) {
+		m.sel = -1
+	}
+	if m.sel < 0 {
+		m.sel = firstSelectable(m.rects)
+	}
+}
+
+// scanChildren returns the animation tree's completed children.
+func (m *Model) scanChildren() []*scan.Node {
+	if m.scanRoot == nil {
+		return nil
+	}
+	return m.scanRoot.Children
+}
+
+// scanTotal sums the real byte sizes of the completed children so far.
+func (m *Model) scanTotal() int64 {
+	var total int64
+	for _, c := range m.scanChildren() {
+		total += c.Size
+	}
+	return total
+}
+
+// armScanTicker starts the growth-animation frame loop if it is not already
+// running. Returns nil when one is already armed.
+func (m *Model) armScanTicker() tea.Cmd {
+	if m.scanTicking {
+		return nil
+	}
+	m.scanTicking = true
+	return m.scanFrameCmd()
+}
+
+// scanFrameCmd schedules the next growth frame. It is one-shot: the handler
+// re-arms it while blocks are still moving.
+func (m *Model) scanFrameCmd() tea.Cmd {
+	return tea.Tick(time.Second/scanFPS, func(t time.Time) tea.Msg {
+		return scanFrameMsg(t)
+	})
+}
+
+// stepScanSprings eases every block one frame toward its real size. It reports
+// whether any block is still moving.
+func (m *Model) stepScanSprings() bool {
+	moving := false
+	for i := range m.scanSprings {
+		s := &m.scanSprings[i]
+		s.pos, s.vel = m.scanSpring.Update(s.pos, s.vel, s.target)
+		if math.Abs(s.pos-s.target) > scanSettleEps {
+			moving = true
+		}
+	}
+	return moving
+}
+
+// settleScanSprings snaps every block to its final size and stops the ticker.
+// Used by tests to reach a deterministic end state.
+func (m *Model) settleScanSprings() {
+	for i := range m.scanSprings {
+		m.scanSprings[i].pos = m.scanSprings[i].target
+		m.scanSprings[i].vel = 0
+	}
+	m.scanTicking = false
+	m.buildScanLayout()
 }
 
 func (m *Model) treemapSize() (int, int) {

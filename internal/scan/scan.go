@@ -28,6 +28,17 @@ type Progress struct {
 	Errors int
 	// Current is the path currently being measured, for the splash screen.
 	Current string
+	// Completed lists the scan root's direct children whose totals became
+	// known since the previous event, in exploration order. The TUI animates
+	// the tree building out from these. Only populated for the top-level pass.
+	Completed []ChildSize
+}
+
+// ChildSize is one direct child of the scan root whose total size is now
+// known: its name and its measured du-style byte count.
+type ChildSize struct {
+	Name string
+	Size int64
 }
 
 // Node is one directory or file. Directories are thin: Children stays nil
@@ -107,7 +118,7 @@ func Measure(ctx context.Context, root string, ch chan<- Progress) (*Scanner, *N
 		seen:   map[fileID]struct{}{},
 	}
 	rootNode := &Node{Name: filepath.Base(root), Path: filepath.Clean(root), IsDir: info.IsDir()}
-	th := &throttle{ch: ch, last: time.Now()}
+	th := &throttle{ch: ch, last: time.Now(), root: rootNode.Path}
 	if info.IsDir() {
 		if err := s.measureDir(ctx, rootNode.Path, info, infoDev(info), th); err != nil {
 			return nil, nil, err
@@ -235,22 +246,32 @@ func (s *Scanner) measureEntries(ctx context.Context, path string, parentDev uin
 			continue
 		}
 		mode := stat.Mode()
+		var childSize int64
+		var isDir bool
 		switch {
 		case mode&fs.ModeSymlink != 0:
 			// Never follow links; count the link itself.
-			total += infoSize(stat)
+			childSize = infoSize(stat)
 		case stat.IsDir():
+			isDir = true
 			dev := infoDev(stat)
 			if dev != 0 && dev != parentDev {
 				// Different filesystem: treat as a leaf (du -x).
-				total += infoSize(stat)
+				childSize = infoSize(stat)
 			} else if err := s.measureDir(ctx, full, stat, dev, th); err != nil {
 				return 0, err
 			} else {
-				total += s.totals[full]
+				childSize = s.totals[full]
 			}
 		default:
-			total += s.dedupSize(stat)
+			childSize = s.dedupSize(stat)
+		}
+		total += childSize
+		// A direct child of the scan root is "explored" the moment its size is
+		// known: files immediately, directories when their subtree walk
+		// returns. Report it so the TUI can grow the treemap block by block.
+		if th != nil && path == th.root {
+			th.reportChild(e.Name(), childSize, isDir)
 		}
 		th.report(1, 0, full)
 	}
@@ -275,10 +296,12 @@ func (s *Scanner) dedupSize(info fs.FileInfo) int64 {
 type throttle struct {
 	ch   chan<- Progress
 	last time.Time
+	root string // scan root; only its direct children are reported as completed
 
 	curVisited, curErrs int
 	lastVisited         int
 	current             string
+	pending             []ChildSize // completed root children since the last flush
 }
 
 func (t *throttle) report(visited, errs int, current string) {
@@ -295,11 +318,26 @@ func (t *throttle) report(visited, errs int, current string) {
 	}
 }
 
+// reportChild notes a direct root child whose size is now known. Directory
+// completions flush immediately so the UI animates each "new block appears"
+// moment; small entries (files, symlinks) ride the regular throttle window so
+// a root full of files does not flood the channel.
+func (t *throttle) reportChild(name string, size int64, dir bool) {
+	if t == nil {
+		return
+	}
+	t.pending = append(t.pending, ChildSize{Name: name, Size: size})
+	if dir {
+		t.flush()
+	}
+}
+
 func (t *throttle) flush() {
 	if t == nil || t.ch == nil {
 		return
 	}
-	t.ch <- Progress{Visited: t.curVisited, Errors: t.curErrs, Current: t.current}
+	t.ch <- Progress{Visited: t.curVisited, Errors: t.curErrs, Current: t.current, Completed: t.pending}
+	t.pending = nil
 	t.last = time.Now()
 	t.lastVisited = t.curVisited
 }

@@ -138,6 +138,87 @@ func TestMeasureThrottledProgress(t *testing.T) {
 	}
 }
 
+// TestMeasureStreamsCompletedChildren verifies that Measure reports each direct
+// child of the scan root as its total becomes known, in exploration order
+// (readdir order, directories when their subtree walk returns, files as they
+// are visited), with their real du-style sizes. Nested directories are never
+// reported — only the scan root's own children.
+func TestMeasureStreamsCompletedChildren(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "adir", "nested", "deep.txt"), "12345")
+	writeFile(t, filepath.Join(root, "afile.txt"), "123")
+	writeFile(t, filepath.Join(root, "zdir", "b.txt"), "12")
+
+	ch := make(chan Progress, 64)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Measure(context.Background(), root, ch)
+		done <- err
+	}()
+	var completed []ChildSize
+	for p := range ch {
+		completed = append(completed, p.Completed...)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	want := []ChildSize{
+		{Name: "adir", Size: fileBlocks(t, filepath.Join(root, "adir", "nested", "deep.txt"))},
+		{Name: "afile.txt", Size: fileBlocks(t, filepath.Join(root, "afile.txt"))},
+		{Name: "zdir", Size: fileBlocks(t, filepath.Join(root, "zdir", "b.txt"))},
+	}
+	if len(completed) != len(want) {
+		t.Fatalf("completed = %d children, want %d (%+v)", len(completed), len(want), completed)
+	}
+	for i, w := range want {
+		if completed[i].Name != w.Name {
+			t.Fatalf("completed[%d].Name = %q, want %q", i, completed[i].Name, w.Name)
+		}
+		if completed[i].Size != w.Size {
+			t.Fatalf("completed[%d] (%s).Size = %d, want %d", i, w.Name, completed[i].Size, w.Size)
+		}
+	}
+}
+
+// TestMeasureCompletedOrderMatchesTree verifies the reported children agree
+// with the materialized root tree (same names and sizes), so the animation
+// always lands on exactly what the browse view will show.
+func TestMeasureCompletedOrderMatchesTree(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a", "f1"), "111111111")
+	writeFile(t, filepath.Join(root, "b", "g2"), "22")
+	writeFile(t, filepath.Join(root, "c.txt"), "3333333333")
+
+	ch := make(chan Progress, 64)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Measure(context.Background(), root, ch)
+		done <- err
+	}()
+	var byName = map[string]int64{}
+	for p := range ch {
+		for _, c := range p.Completed {
+			byName[c.Name] = c.Size
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_, tree, err := Measure(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Children) != len(byName) {
+		t.Fatalf("streamed %d children, tree has %d", len(byName), len(tree.Children))
+	}
+	for _, c := range tree.Children {
+		if got, ok := byName[c.Name]; !ok || got != c.Size {
+			t.Fatalf("streamed %s = %d (present: %v), tree has %d", c.Name, got, ok, c.Size)
+		}
+	}
+}
+
 func TestHardlinkDedup(t *testing.T) {
 	root := t.TempDir()
 	a := filepath.Join(root, "a.bin")

@@ -49,8 +49,12 @@ func (m *Model) View() (out string) {
 
 func (m *Model) view() string {
 	switch m.mode {
-	case modeSplash:
-		return m.splashView()
+	case modeScanning:
+		// Before any child completes, show the centered scanning splash; once
+		// blocks exist the view falls through to the live treemap below.
+		if len(m.rects) == 0 {
+			return m.scanningView()
+		}
 	case modeMeasuring:
 		return m.measuringView()
 	case modeError:
@@ -681,6 +685,19 @@ func (m *Model) infoLine() string {
 				left += " · " + d
 			}
 		}
+	case modeScanning:
+		if n := m.selectedNode(); n != nil {
+			left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
+		}
+		right = fmt.Sprintf("scanning · %d children", len(m.scanChildren()))
+		if total := m.scanTotal(); total > 0 {
+			right += fmt.Sprintf(" · %s so far", formatBytes(total))
+		}
+		right += fmt.Sprintf(" · visited %d", m.progress.Visited)
+		if m.progress.Errors > 0 {
+			right += fmt.Sprintf(" · %d errors", m.progress.Errors)
+		}
+		right += fmt.Sprintf(" · %s", time.Since(m.start).Round(time.Second))
 	default:
 		if n := m.selectedNode(); n != nil {
 			left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
@@ -740,6 +757,11 @@ func (m *Model) helpLineBindings() []keybind {
 			{"↑↓←→", "select"},
 			{"enter", "scan"},
 			{"?", "help"},
+			{"q", "quit"},
+		}
+	}
+	if m.effectiveMode() == modeScanning {
+		return []keybind{
 			{"q", "quit"},
 		}
 	}
@@ -853,7 +875,10 @@ func centerRows(areaH int, lines []string) []string {
 	return append(out, lines...)
 }
 
-func (m *Model) splashView() string {
+// scanningView is the placeholder shown while the scan runs but before the
+// first child completes: a centered spinner with the root path and progress
+// counts. Once blocks exist, view() renders the live growing treemap instead.
+func (m *Model) scanningView() string {
 	path := truncate(m.progress.Current, max(20, m.width-10))
 	lines := []string{
 		"",
