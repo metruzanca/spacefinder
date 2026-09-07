@@ -315,6 +315,71 @@ func TestLayoutFixtureTilesContainer(t *testing.T) {
 
 // TestLayoutWithMinCells asserts that items too small to matter are folded
 // into the "other" bucket and are no longer rendered (or selectable).
+func TestLayoutFixedLeavesEmptySpace(t *testing.T) {
+	// Two small items at a scale where their true areas are tiny: they are
+	// clamped to minArea and only fill a sliver of the grid, leaving the rest
+	// empty (cells with no rectangle).
+	const w, h = 40, 10
+	items := []Item{
+		{Name: "a", Size: 10, Selectable: true},
+		{Name: "b", Size: 10, Selectable: true},
+	}
+	rs := LayoutFixed(items, w, h, 1.0, 4.0)
+	if len(rs) != 2 {
+		t.Fatalf("LayoutFixed produced %d rects, want 2", len(rs))
+	}
+	// Both tiles are clamped to the 4-cell floor, so they are not hairlines.
+	for _, r := range rs {
+		if r.W <= 0 || r.H <= 0 {
+			t.Fatalf("degenerate rect: %#v", r)
+		}
+		if r.W*r.H < 4.0-1e-6 {
+			t.Fatalf("tile %#v below the min area", r)
+		}
+		if r.X < 0 || r.Y < 0 || r.X+r.W > w || r.Y+r.H > h {
+			t.Fatalf("rect escapes the grid: %#v", r)
+		}
+	}
+	// The clamped areas (8 cells) cover far less than the grid (400 cells), so
+	// most cells must belong to no rectangle.
+	cells := Raster(rs, w, h)
+	empty := 0
+	for _, c := range cells {
+		if c == -1 {
+			empty++
+		}
+	}
+	if empty < w*h/2 {
+		t.Fatalf("expected the majority of cells to be empty, got %d of %d", w*h-empty, w*h)
+	}
+}
+
+func TestLayoutFixedDeterministic(t *testing.T) {
+	items := []Item{
+		{Name: "big", Size: 500, Selectable: true},
+		{Name: "mid", Size: 200, Selectable: true},
+		{Name: "small", Size: 50, Selectable: true},
+	}
+	one := LayoutFixed(items, 60, 30, 0.5, 10)
+	two := LayoutFixed(items, 60, 30, 0.5, 10)
+	if !reflect.DeepEqual(one, two) {
+		t.Fatal("LayoutFixed is not deterministic")
+	}
+	// A larger min area must inflate the small tile's footprint.
+	small := func(minArea float64) float64 {
+		rs := LayoutFixed(items, 60, 30, 0.5, minArea)
+		for _, r := range rs {
+			if r.Index == 2 {
+				return r.W * r.H
+			}
+		}
+		return 0
+	}
+	if small(10) >= small(60) {
+		t.Fatalf("raising minArea did not grow the small tile: %.1f vs %.1f", small(10), small(60))
+	}
+}
+
 func TestLayoutWithMinCells(t *testing.T) {
 	items := []Item{{Name: "big", Size: 1000, Selectable: true}}
 	for i := 0; i < 50; i++ {

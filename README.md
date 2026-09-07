@@ -53,8 +53,10 @@ Spacefinder supports both keyboard inputs via arrow/vim keys, `enter` & `esc` fo
 ## TODO
 
 Directories with more entries than fit at a legible minimum size are split
-across pages (`tab` / `shift+tab`, or the arrow/wheel edges) so every file or
-folder, no matter how small, can be reached.
+across pages (`tab` / `shift+tab`, or the arrow/wheel edges). All pages share
+one scale, so later pages show the genuinely smaller entries at their true
+size (clamped to a readable minimum) with the empty tail as plain background —
+every file or folder, no matter how small, can be reached.
 
 Filters are another idea from [Spacesniffer][1] which would be useful: filter by file type, age, file size. Spacesniffer also net you tag files, which could be useful for filtering. And exporting a report could also be useful, though I've never used that feature from spacesniffer.
 

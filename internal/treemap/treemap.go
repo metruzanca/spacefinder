@@ -126,6 +126,60 @@ func LayoutWith(items []Item, w, h, maxRects, minCells int) []Rect {
 	return out
 }
 
+// LayoutFixed lays items out at an absolute scale (Size*scale cell units), each
+// clamped up to at least minArea cells. Unlike Layout, it does not normalize
+// areas to tile the container: if the clamped areas sum to less than the grid,
+// the remainder is left empty (no rectangle covers those cells). Items are
+// sorted descending by area; ties keep input order. Items with non-positive
+// size are dropped. A minArea of 0 disables the clamp.
+func LayoutFixed(items []Item, w, h int, scale, minArea float64) []Rect {
+	if w <= 0 || h <= 0 || len(items) == 0 || scale <= 0 {
+		return nil
+	}
+	work := make([]Item, 0, len(items))
+	for _, it := range items {
+		if it.Size <= 0 {
+			continue
+		}
+		work = append(work, it)
+	}
+	if len(work) == 0 {
+		return nil
+	}
+
+	// Descending by size with input order preserved for ties (monotonic with
+	// area since scale is constant).
+	sort.SliceStable(work, func(i, j int) bool { return work[i].Size > work[j].Size })
+
+	cells := make([]cell, 0, len(work))
+	for i, it := range work {
+		area := float64(it.Size) * scale
+		if minArea > 0 && area < minArea {
+			area = minArea
+		}
+		cells = append(cells, cell{Item: it, area: area, index: i})
+	}
+
+	out := make([]Rect, 0, len(cells))
+	squarify(cells, 0, 0, float64(w), float64(h), &out)
+	// Clamp so no rendered extent ever escapes the grid (same guard as above).
+	for i := range out {
+		if out[i].X < 0 {
+			out[i].X = 0
+		}
+		if out[i].Y < 0 {
+			out[i].Y = 0
+		}
+		if out[i].X+out[i].W > float64(w) {
+			out[i].W = float64(w) - out[i].X
+		}
+		if out[i].Y+out[i].H > float64(h) {
+			out[i].H = float64(h) - out[i].Y
+		}
+	}
+	return out
+}
+
 // squarify lays out cells into strips inside the free box x,y,w,h, appending
 // to out. cells must be sorted by decreasing area.
 func squarify(cells []cell, x, y, w, h float64, out *[]Rect) {

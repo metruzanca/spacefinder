@@ -33,9 +33,21 @@ const maxRects = 0 // no cap: every non-empty entry is reachable across pages
 const minTileRows = 3
 const minTileCols = 6
 
+// minTileArea is the smallest area a tile may occupy at the shared scale, so
+// tiny items render as chunky blocks rather than hairlines.
+const minTileArea = minTileRows * minTileCols
+
+// minLabelRows/minLabelCols are the smallest tile dimensions that can still
+// carry a (truncated) name label. drawLabel needs ≥3 rows and ≥3 columns for
+// at least one character; squarify's natural aspect for a dense tail is ~4
+// wide, so a strict 6-column floor would split every tail item onto its own
+// page. The area floor keeps tiles chunky; this guards only against hairlines.
+const minLabelRows = 3
+const minLabelCols = 3
+
 // minTileCells is the area equivalent of the floor, used by the single-screen
 // filesystem picker (LayoutWith folds too-small tiles into "other").
-const minTileCells = minTileRows * minTileCols
+const minTileCells = minTileArea
 
 type mode int
 
@@ -126,6 +138,8 @@ type Model struct {
 	pageStart []int
 	pageIdx   []int
 	pageOf    []int
+	pageScale float64      // bytes→cells scale shared by every page of the level
+	pageMin   []float64    // per-page minimum tile area (raised for partial tails)
 
 	// free-space gutter (only shown at the scan root)
 	freeBytes int64
@@ -1079,11 +1093,14 @@ func (m *Model) buildLayout() {
 }
 
 // buildPages partitions ordered (sorted-descending child indices) into pages.
-// A page is the longest contiguous run that can be laid out over the grid with
-// every tile at least minTileRows × minTileCols. Feasibility is monotonic in
-// the run length (adding smaller items can only shrink the smallest tile), so
-// the largest run is found with a binary search; a single-item page always
-// fills the grid and is thus always feasible.
+// All pages share one bytes→cells scale (the whole level's), so items keep
+// their true relative size across pages: page 1 holds the biggest entries, the
+// last page the smallest, drawn at that shared scale down to the minimum tile
+// size. Feasibility at a fixed scale is not monotonic in the run length
+// (uniform tiles only pack into complete rows), so each page is found by
+// scanning down from the largest possible run to the first feasible one, and a
+// remainder too small to form a legible row becomes its own page whose tiles
+// are lifted to the floor.
 func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
 	n := len(ordered)
 	m.ordered = ordered
@@ -1092,45 +1109,79 @@ func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
 		m.pageOf[i] = -1
 	}
 	m.pageStart = make([]int, 0, n)
-	maxPage := (w * h) / (minTileRows * minTileCols)
-	if maxPage < 1 {
-		maxPage = 1
+	m.pageMin = nil
+	gridArea := float64(w * h)
+	m.pageScale = gridArea / float64(m.orderedTotal(children))
+
+	// Cumulative clamped area: page boundaries are first bounded by area (a
+	// feasible page can never exceed the grid), then trimmed by a real layout.
+	cum := make([]float64, n+1)
+	for i, id := range ordered {
+		a := float64(layoutSize(children[id].Size)) * m.pageScale
+		if a < minTileArea {
+			a = minTileArea
+		}
+		cum[i+1] = cum[i] + a
 	}
-	sizes := make([]int64, len(children))
-	for i, c := range children {
-		sizes[i] = c.Size
-	}
+
 	start := 0
 	for start < n {
 		m.pageStart = append(m.pageStart, start)
 		page := len(m.pageStart) - 1
-		lo, hi := start, min(start+maxPage, n)
-		best := start
+		// Largest end whose clamped area fits the grid (cumulative is sorted).
+		lo, hi := start+1, n
 		for lo <= hi {
 			mid := (lo + hi) / 2
-			if pageFeasible(ordered[start:mid], w, h, sizes) {
-				best = mid
+			if cum[mid]-cum[start] <= gridArea {
 				lo = mid + 1
 			} else {
 				hi = mid - 1
 			}
 		}
-		if best == start {
-			best = start + 1 // degenerate tiny grid: still make progress
+		end := lo - 1
+		if end <= start {
+			end = start + 1
 		}
-		for i := start; i < best; i++ {
+		// Trim past the trailing partial row (usually a handful of items).
+		for end > start && !pageFeasible(ordered[start:end], w, h, children, m.pageScale, minTileArea) {
+			end--
+		}
+		minArea := float64(minTileArea)
+		if end == start {
+			// The remainder cannot form a legible row at the floor; take it all
+			// and lift its tiles until they lay out legibly. The lift is
+			// bounded: on a grid too small to ever hold a legible tile (the
+			// view already reports "terminal too small") no min area works, so
+			// give up and render whatever fits.
+			end = n
+			for iters := 0; iters < 24 && !pageFeasible(ordered[start:end], w, h, children, m.pageScale, minArea); iters++ {
+				minArea *= 2
+			}
+		}
+		for i := start; i < end; i++ {
 			m.pageOf[ordered[i]] = page
 		}
-		start = best
+		m.pageMin = append(m.pageMin, minArea)
+		start = end
 	}
 	m.pageStart = append(m.pageStart, n)
 	m.pageCount = len(m.pageStart) - 1
 }
 
-// pageFeasible reports whether laying the given items out over the grid keeps
-// every tile at or above the legibility floor. An empty page trivially does;
-// on a grid too small for the floor, the floor is waived.
-func pageFeasible(ids []int, w, h int, sizes []int64) bool {
+// orderedTotal sums the layout sizes of the level's non-zero children.
+func (m *Model) orderedTotal(children []*scan.Node) int64 {
+	var total int64
+	for _, c := range children {
+		total += layoutSize(c.Size)
+	}
+	return total
+}
+
+// pageFeasible reports whether laying the given items out at the shared scale,
+// clamping each to at least minArea cells, keeps every tile at or above the
+// label floor and stays within the grid. An empty page trivially does; on a
+// grid too small for the floor, the floor is waived.
+func pageFeasible(ids []int, w, h int, children []*scan.Node, scale, minArea float64) bool {
 	if len(ids) == 0 {
 		return true
 	}
@@ -1139,20 +1190,23 @@ func pageFeasible(ids []int, w, h int, sizes []int64) bool {
 	}
 	items := make([]treemap.Item, len(ids))
 	for i, id := range ids {
-		items[i] = treemap.Item{Name: "", Size: layoutSize(sizes[id]), Selectable: true}
+		items[i] = treemap.Item{Name: "", Size: layoutSize(children[id].Size), Selectable: true}
 	}
-	rs := treemap.Layout(items, w, h, maxRects)
+	rs := treemap.LayoutFixed(items, w, h, scale, minArea)
+	if len(rs) != len(ids) {
+		return false // some items would be crushed off the grid
+	}
 	for _, r := range rs {
-		if r.W < minTileCols || r.H < minTileRows {
+		if r.W < minLabelCols || r.H < minLabelRows {
 			return false
 		}
 	}
 	return true
 }
 
-// layoutPage lays page p of the current level out over the grid and fills the
-// rect/raster/tile buffers. rect Index refers to the position in the page's
-// item list, which resolves through m.pageIdx to a global child index.
+// layoutPage lays page p of the current level out at the shared scale and
+// fills the rect/raster/tile buffers. rect Index refers to the position in the
+// page's item list, which resolves through m.pageIdx to a global child index.
 func (m *Model) layoutPage(p, w, h int) {
 	m.page = p
 	ids := m.ordered[m.pageStart[p]:m.pageStart[p+1]]
@@ -1162,7 +1216,7 @@ func (m *Model) layoutPage(p, w, h int) {
 		c := m.current.Children[id]
 		items[i] = treemap.Item{Name: c.Name, Size: layoutSize(c.Size), Selectable: true}
 	}
-	m.rects = treemap.Layout(items, w, h, maxRects)
+	m.rects = treemap.LayoutFixed(items, w, h, m.pageScale, m.pageMin[p])
 	m.raster = treemap.Raster(m.rects, w, h)
 	m.tiles = make([]tileStyle, len(m.rects))
 	for i := range m.rects {

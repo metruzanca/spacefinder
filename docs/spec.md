@@ -58,11 +58,16 @@ A level with more children than can be shown at a legible minimum size is
 split into pages, turned with `tab` / `shift+tab` (or `pgup` / `pgdn`), so no
 directory entry is ever hidden away:
 
-- Each page is a full-screen treemap of that page's entries, ordered
-  largest-first; page 1 holds the biggest entries, the last page the smallest.
-- Every rendered tile is at least 3 rows tall and 6 columns wide, so its name
-  label always fits; a tile too small for that on the current page spills to
-  the next page (where it is re-laid out at the same floor).
+- All pages share one bytes→cells scale (the whole level's), so items keep
+  their true relative size across pages: page 1 holds the biggest entries, the
+  last page the smallest, each drawn at that shared scale down to the minimum
+  tile size.
+- Every rendered tile keeps at least a 3×3 footprint (a name label needs ≥3
+  rows and ≥3 columns); items are clamped up to that floor, so a tiny entry
+  still renders as a readable block rather than a hairline. A page that would
+  end in a too-thin partial row is split so its items move to the next page.
+- Because later pages hold genuinely small items, they are usually sparse: the
+  unused area renders as plain terminal background (the empty tail of the map).
 - Moving down or right past the page's last (bottom-right) tile — or up or
   left past the first (top-left) tile — wraps to the neighbouring page, and
   the mouse wheel behaves the same way at the page edges.
@@ -136,9 +141,10 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
   shows at the scan root only, capped to a few rows so the content map keeps
   the screen.
 - **Minimum tile size + pages**: no entry is capped away; instead the level is
-  paginated so every rendered tile is at least 3 rows × 6 columns (legible name
-  label) and anything that would not fit on the current page moves to the next
-  one. See "Paging" above.
+  paginated at one shared scale so every rendered tile keeps a legible 3×3
+  footprint and anything that would not fit legibly on the current page moves
+  to the next one, with the small tail drawn as smaller (sparser) pages. See
+  "Paging" above.
 - **Info row**: a single row below the breadcrumbs describes the current
   selection (name, size, share) and, pinned to the right, the level's children
   count, hidden (zero-size) count, and page number (`page X/Y`) when paged;

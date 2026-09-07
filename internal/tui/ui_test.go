@@ -217,7 +217,7 @@ func TestPagesReachAllChildren(t *testing.T) {
 		t.Fatalf("pageCount = %d, want multiple pages for 105 children", m.pageCount)
 	}
 	// Every non-zero child is reachable across the pages, and no page renders a
-	// tile below the legibility floor.
+	// tile below the label floor.
 	w, h := m.treemapSize()
 	seen := map[int]bool{}
 	for p := 0; p < m.pageCount; p++ {
@@ -232,8 +232,8 @@ func TestPagesReachAllChildren(t *testing.T) {
 			if r.Index < 0 {
 				continue
 			}
-			if r.W < minTileCols || r.H < minTileRows {
-				t.Fatalf("page %d has a tile below the floor: %#v", p, r)
+			if r.W < minLabelCols || r.H < minLabelRows {
+				t.Fatalf("page %d has a tile below the label floor: %#v", p, r)
 			}
 		}
 	}
@@ -440,6 +440,64 @@ func TestPageIndicatorShown(t *testing.T) {
 	s := browseModel()
 	if strings.Contains(s.infoLine(), "page 1/1") {
 		t.Fatal("single-page level should not show a page indicator")
+	}
+}
+
+// TestSharedScaleAcrossPages verifies that pages share one bytes→cells scale
+// instead of re-normalizing each page to fill the screen: the dominant item on
+// page 1 keeps (nearly) its true share of the grid, and the tail on later
+// pages stays at the minimum tile area rather than being blown up to page
+// size, leaving empty gaps on sparse pages.
+func TestSharedScaleAcrossPages(t *testing.T) {
+	m := newModel("/")
+	m.mode = modeBrowse
+	m.width, m.height = 80, 24
+	children := []*scan.Node{
+		{Name: "huge", Path: "/huge", IsDir: true, Size: 1 << 33},
+	}
+	for i := 0; i < 40; i++ {
+		children = append(children, &scan.Node{Name: fmt.Sprintf("f%02d", i), Path: "/x", IsDir: false, Size: 1 << 10})
+	}
+	m.tree = &scan.Node{Name: "fs", Path: "/", IsDir: true, Children: children}
+	m.current = m.tree
+	m.buildLayout()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	w, h := m.treemapSize()
+	grid := float64(w * h)
+
+	// Page 1: the dominant item keeps its true ~98% share of the grid.
+	m.layoutPage(0, w, h)
+	p1max := 0.0
+	for _, r := range m.rects {
+		if r.Index >= 0 && r.W*r.H > p1max {
+			p1max = r.W * r.H
+		}
+	}
+	if p1max < 0.9*grid {
+		t.Fatalf("page 1 dominant tile uses %.1f%% of the grid, want ≥90%%", 100*p1max/grid)
+	}
+
+	// Page 2: the tail is clamped to the minimum area (not re-scaled to page
+	// size), so the page is sparse with leftover gap cells.
+	m.layoutPage(1, w, h)
+	empty := 0
+	for _, c := range m.raster {
+		if c == -1 {
+			empty++
+		}
+	}
+	if empty == 0 {
+		t.Fatal("shared scale should leave empty gaps on a sparse tail page")
+	}
+	for _, r := range m.rects {
+		if r.Index < 0 {
+			continue
+		}
+		if r.W*r.H > 2*minTileArea {
+			t.Fatalf("tail tile %#v inflated beyond the minimum, breaking the shared scale", r)
+		}
 	}
 }
 
