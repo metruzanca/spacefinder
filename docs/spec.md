@@ -55,8 +55,9 @@ locate bottlenecks and, if desired, delete them.
 ## Paging
 
 A level with more children than can be shown at a legible minimum size is
-split into pages, turned with `tab` / `shift+tab` (or `pgup` / `pgdn`), so no
-directory entry is ever hidden away:
+split into pages, turned explicitly with `pgup` / `pgdn` or by activating a
+full-height arrow gutter on the edge of the map, so no directory entry is ever
+hidden away:
 
 - All pages share one bytes→cells scale (the whole level's), so items keep
   their true relative size across pages: page 1 holds the biggest entries, the
@@ -68,9 +69,14 @@ directory entry is ever hidden away:
   end in a too-thin partial row is split so its items move to the next page.
 - Because later pages hold genuinely small items, they are usually sparse: the
   unused area renders as plain terminal background (the empty tail of the map).
-- Moving down or right past the page's last (bottom-right) tile — or up or
-  left past the first (top-left) tile — wraps to the neighbouring page, and
-  the mouse wheel behaves the same way at the page edges.
+- Each paged level gets a 3-column gutter on the right edge of the map (next
+  page) and, on all but the first page, one on the left edge (previous page),
+  drawn as a full-height strip with a centred arrow glyph. The gutters are
+  ordinary selectable cells: arrow/Vim keys and the mouse wheel reach them, and
+  the layout is chunked at the surviving width so every page stays legible
+  inside its gutters. `Enter` (or a double-click) on a gutter flips the page;
+  a single click only selects it. Selection never wraps across page edges — the
+  gutters are the explicit boundary.
 - The status line shows `page X/Y` when a level spans more than one page.
 - Only zero-size entries are dropped entirely (surfaced as a hidden count);
   everything else is reachable somewhere.
@@ -79,16 +85,15 @@ directory entry is ever hidden away:
 
 Mouse cell motion is enabled on the alternate screen.
 
-- Left-click selects the block under the cursor.
+- Left-click selects the block or page-arrow gutter under the cursor.
 - Double-click within the debounce window (~350 ms) on the same block opens
-  the entry: directories drill in, and files are launched in the OS default
+  the entry: directories drill in, files are launched in the OS default
   application via `open` (macOS), `xdg-open` (Linux), or
-  `rundll32 url.dll,FileProtocolHandler` (Windows). The opener runs detached,
-  so a long-running app does not tie up the TUI; only launch failures surface
-  as errors.
+  `rundll32 url.dll,FileProtocolHandler` (Windows), and a page arrow flips the
+  page. The opener runs detached, so a long-running app does not tie up the
+  TUI; only launch failures surface as errors.
 - Right-click goes up a level.
-- The mouse wheel moves the selection up and down (and, at a page's top or
-  bottom edge, turns the page).
+- The mouse wheel moves the selection up and down.
 
 ## Deletion
 

@@ -26,6 +26,9 @@ import (
 
 const maxRects = 0 // no cap: every non-empty entry is reachable across pages
 
+// pageGutterCols is the width in columns of each pagination arrow gutter strip.
+const pageGutterCols = 3
+
 // Floor tile dimensions. Every rendered tile is at least minTileRows tall and
 // minTileCols wide, so its name label is legible (drawLabel needs ~3 rows and a
 // few columns). Sizes are guaranteed by paginating the level: children are
@@ -170,8 +173,14 @@ type Model struct {
 	pageStart []int
 	pageIdx   []int
 	pageOf    []int
-	pageScale float64      // bytes→cells scale shared by every page of the level
-	pageMin   []float64    // per-page minimum tile area (raised for partial tails)
+	pageScale float64   // bytes→cells scale shared by every page of the level
+	pageMin   []float64 // per-page minimum tile area (raised for partial tails)
+
+	// pagination arrow gutter rects: positions in m.rects of the next/prev
+	// arrow strips, or -1 when absent. Arrows are selectable elements that
+	// flip pages on Enter or mouse double-click.
+	nextArrow int
+	prevArrow int
 
 	// free-space gutter (only shown at the scan root)
 	freeBytes int64
@@ -331,6 +340,8 @@ func (m *Model) buildPickerLayout() {
 		m.rects = nil
 		m.raster = nil
 		m.tiles = nil
+		m.nextArrow = -1
+		m.prevArrow = -1
 		return
 	}
 	w, h := m.treemapSize()
@@ -343,6 +354,7 @@ func (m *Model) buildPickerLayout() {
 	// The picker is a single page; LayoutWith preserves input order, so each
 	// rect Index equals its position in pickerNodes.
 	m.page, m.pageCount = 0, 1
+	m.nextArrow, m.prevArrow = -1, -1
 	m.pageIdx = make([]int, len(children))
 	for i := range m.pageIdx {
 		m.pageIdx[i] = i
@@ -892,6 +904,10 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "?":
 		return m.openHelp(), nil
 	case msg.Type == tea.KeyEnter:
+		if dir := m.selectedArrow(); dir != 0 {
+			m.activateArrow(dir)
+			return m, nil
+		}
 		return m, m.drill()
 	case msg.String() == "r":
 		return m, m.rescan()
@@ -903,11 +919,11 @@ func (m *Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case msg.Type == tea.KeyEsc:
 		m.up()
-	case msg.Type == tea.KeyTab, msg.Type == tea.KeyPgDown:
+	case msg.Type == tea.KeyPgDown:
 		if m.nextPage() {
 			m.sel = firstSelectable(m.rects)
 		}
-	case msg.Type == tea.KeyShiftTab, msg.Type == tea.KeyPgUp:
+	case msg.Type == tea.KeyPgUp:
 		if m.prevPage() {
 			m.sel = lastSelectable(m.rects)
 		}
@@ -952,13 +968,13 @@ func (m *Model) quit() (tea.Model, tea.Cmd) {
 
 // updateMouse handles pointer interaction: click selects, a same-tile click
 // within the debounce window opens the entry (drilling into a directory,
-// launching a file in the OS default app), right-click goes up, and the wheel
-// moves the selection.
+// launching a file in the OS default app, or flipping a page from a pagination
+// arrow), right-click goes up, and the wheel moves the selection.
 func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
 		tile := m.cellAt(msg.X, msg.Y)
-		if tile < 0 || tile >= len(m.rects) || m.rects[tile].Index < 0 {
+		if tile < 0 || tile >= len(m.rects) || !isNavigableRect(m.rects[tile].Index) {
 			return m, nil
 		}
 		now := time.Now()
@@ -967,6 +983,10 @@ func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.lastClick = now
 		m.sel = tile
 		if double {
+			if dir, ok := arrowOf(m.rects[tile].Index); ok {
+				m.activateArrow(dir)
+				return m, nil
+			}
 			n := m.selectedNode()
 			if n != nil && !n.IsDir {
 				return m, m.openFile()
@@ -1166,6 +1186,7 @@ func (m *Model) buildLayout() {
 		m.page, m.pageCount = 0, 0
 		m.ordered, m.pageStart, m.pageOf, m.pageIdx = nil, nil, nil, nil
 		m.rects, m.raster, m.tiles = nil, nil, nil
+		m.nextArrow, m.prevArrow = -1, -1
 		return
 	}
 
@@ -1194,7 +1215,32 @@ func (m *Model) buildLayout() {
 // scanning down from the largest possible run to the first feasible one, and a
 // remainder too small to form a legible row becomes its own page whose tiles
 // are lifted to the floor.
+//
+// The layout is first chunked at the full width. If the level needs more than
+// one page, pages are re-chunked at the content width a single pagination
+// arrow leaves (w − 3 columns), so every page stays legible both inside its
+// arrow gutter and at the tighter boxes pages share.
 func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
+	m.chunkPages(ordered, w, h, w, children)
+	if m.pageCount <= 1 {
+		return
+	}
+	cw := w - pageGutterCols
+	if cw < 1 {
+		cw = 1
+	}
+	m.chunkPages(ordered, w, h, cw, children)
+	if m.pageCount <= 1 {
+		// The tighter scale fit the whole level on one page, so no arrows are
+		// needed after all; restore the full-width layout.
+		m.chunkPages(ordered, w, h, w, children)
+	}
+}
+
+// chunkPages runs one page-chunking pass: bounds every page by grid area at the
+// given content width, trims to the layout-feasible prefix, and records the
+// shared scale and per-page minimum tile area for that width.
+func (m *Model) chunkPages(ordered []int, w, h, cw int, children []*scan.Node) {
 	n := len(ordered)
 	m.ordered = ordered
 	m.pageOf = make([]int, len(children))
@@ -1203,7 +1249,7 @@ func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
 	}
 	m.pageStart = make([]int, 0, n)
 	m.pageMin = nil
-	gridArea := float64(w * h)
+	gridArea := float64(cw * h)
 	m.pageScale = gridArea / float64(m.orderedTotal(children))
 
 	// Cumulative clamped area: page boundaries are first bounded by area (a
@@ -1236,7 +1282,7 @@ func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
 			end = start + 1
 		}
 		// Trim past the trailing partial row (usually a handful of items).
-		for end > start && !pageFeasible(ordered[start:end], w, h, children, m.pageScale, minTileArea) {
+		for end > start && !pageFeasible(ordered[start:end], cw, h, children, m.pageScale, minTileArea) {
 			end--
 		}
 		minArea := float64(minTileArea)
@@ -1247,7 +1293,7 @@ func (m *Model) buildPages(ordered []int, w, h int, children []*scan.Node) {
 			// view already reports "terminal too small") no min area works, so
 			// give up and render whatever fits.
 			end = n
-			for iters := 0; iters < 24 && !pageFeasible(ordered[start:end], w, h, children, m.pageScale, minArea); iters++ {
+			for iters := 0; iters < 24 && !pageFeasible(ordered[start:end], cw, h, children, m.pageScale, minArea); iters++ {
 				minArea *= 2
 			}
 		}
@@ -1300,6 +1346,8 @@ func pageFeasible(ids []int, w, h int, children []*scan.Node, scale, minArea flo
 // layoutPage lays page p of the current level out at the shared scale and
 // fills the rect/raster/tile buffers. rect Index refers to the position in the
 // page's item list, which resolves through m.pageIdx to a global child index.
+// When the level is paged, full-height gutter strips with pagination arrows
+// are appended to the right and/or left edges of the grid.
 func (m *Model) layoutPage(p, w, h int) {
 	m.page = p
 	ids := m.ordered[m.pageStart[p]:m.pageStart[p+1]]
@@ -1309,7 +1357,46 @@ func (m *Model) layoutPage(p, w, h int) {
 		c := m.current.Children[id]
 		items[i] = treemap.Item{Name: c.Name, Size: layoutSize(c.Size), Selectable: true}
 	}
-	m.rects = treemap.LayoutFixed(items, w, h, m.pageScale, m.pageMin[p])
+
+	// Compute content box: arrows take a 3-column gutter on each edge.
+	m.nextArrow = -1
+	m.prevArrow = -1
+	prev := p > 0
+	next := p < m.pageCount-1
+	xoff := 0
+	contentW := w
+	if prev {
+		contentW -= pageGutterCols
+		xoff = pageGutterCols
+	}
+	if next {
+		contentW -= pageGutterCols
+	}
+	if contentW < 1 {
+		contentW = 1
+	}
+	// Lay tiles out in the content box, then shift by the x offset.
+	m.rects = treemap.LayoutFixed(items, contentW, h, m.pageScale, m.pageMin[p])
+	for i := range m.rects {
+		m.rects[i].X += float64(xoff)
+	}
+	// Append gutter strip rects for pagination arrows.
+	if prev {
+		m.prevArrow = len(m.rects)
+		m.rects = append(m.rects, treemap.Rect{
+			Index: idxPagePrev,
+			X: 0, Y: 0,
+			W: float64(pageGutterCols), H: float64(h),
+		})
+	}
+	if next {
+		m.nextArrow = len(m.rects)
+		m.rects = append(m.rects, treemap.Rect{
+			Index: idxPageNext,
+			X: float64(w - pageGutterCols), Y: 0,
+			W: float64(pageGutterCols), H: float64(h),
+		})
+	}
 	m.raster = treemap.Raster(m.rects, w, h)
 	m.tiles = colorTiles(m.rects, m.raster, w, h)
 }
@@ -1356,6 +1443,7 @@ func (m *Model) buildScanLayout() {
 		m.page, m.pageCount = 0, 0
 		m.pageIdx = nil
 		m.rects, m.raster, m.tiles = nil, nil, nil
+		m.nextArrow, m.prevArrow = -1, -1
 		m.sel = -1
 		return
 	}
@@ -1382,6 +1470,7 @@ func (m *Model) buildScanLayout() {
 	// A single page; rect Index equals the position in ordered, which maps to
 	// the matching scan child.
 	m.page, m.pageCount = 0, 1
+	m.nextArrow, m.prevArrow = -1, -1
 	m.pageIdx = ordered
 	m.ordered, m.pageStart, m.pageOf = nil, nil, nil
 	m.tiles = colorTiles(m.rects, m.raster, w, h)
@@ -1509,6 +1598,63 @@ func (m *Model) selectedNode() *scan.Node {
 	return m.current.Children[m.pageIdx[idx]]
 }
 
+// selectedArrow reports which pagination arrow strip the selection is on: +1
+// for the next-page arrow, -1 for the previous-page arrow, 0 when the selection
+// is on a real tile or nowhere.
+func (m *Model) selectedArrow() int {
+	if m.sel < 0 || m.sel >= len(m.rects) {
+		return 0
+	}
+	switch m.rects[m.sel].Index {
+	case idxPageNext:
+		return 1
+	case idxPagePrev:
+		return -1
+	}
+	return 0
+}
+
+// arrowOf maps a rect index to its pagination direction (+1 next, -1 prev);
+// ok is false when the rect is not an arrow strip.
+func arrowOf(index int) (dir int, ok bool) {
+	switch index {
+	case idxPageNext:
+		return 1, true
+	case idxPagePrev:
+		return -1, true
+	}
+	return 0, false
+}
+
+// activateArrow flips the page in the given arrow direction and parks the
+// selection on a real tile of the new page (the first going forward, the last
+// going back). It reports whether a page flipped.
+func (m *Model) activateArrow(dir int) bool {
+	var ok bool
+	if dir > 0 {
+		ok = m.nextPage()
+	} else {
+		ok = m.prevPage()
+	}
+	if !ok {
+		return false
+	}
+	if dir > 0 {
+		m.sel = firstSelectable(m.rects)
+	} else {
+		m.sel = lastSelectable(m.rects)
+	}
+	return true
+}
+
+// arrowRune is the glyph for a pagination arrow direction (dir > 0 → next).
+func arrowRune(dir int) string {
+	if dir > 0 {
+		return "→"
+	}
+	return "←"
+}
+
 func firstSelectable(rects []treemap.Rect) int {
 	for i := range rects {
 		if rects[i].Index >= 0 {
@@ -1519,7 +1665,7 @@ func firstSelectable(rects []treemap.Rect) int {
 }
 
 // lastSelectable is the trailing real tile: the smallest, laid out last and
-// sitting in the bottom-right of the map. It anchors forward page wrapping.
+// sitting at the bottom-right of the map. It anchors backward page landing.
 func lastSelectable(rects []treemap.Rect) int {
 	for i := len(rects) - 1; i >= 0; i-- {
 		if rects[i].Index >= 0 {

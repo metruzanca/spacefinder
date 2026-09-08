@@ -84,16 +84,24 @@ func styleForHue(hue float64) tileStyle {
 
 // colorTiles produces one tileStyle per rectangle. The "other" bucket (rect
 // Index < 0) keeps the neutral otherStyle; every real tile is coloured from
-// tilePalette so that edge-adjacent rectangles never share a colour.
+// tilePalette so that edge-adjacent rectangles never share a colour. Pagination
+// arrow strips get their dedicated gutter style.
 func colorTiles(rects []treemap.Rect, raster []int, w, h int) []tileStyle {
 	tiles := make([]tileStyle, len(rects))
 	cols := assignColors(rects, raster, w, h)
 	for i := range rects {
-		if cols[i] < 0 {
+		switch rects[i].Index {
+		case idxPageNext, idxPagePrev:
+			tiles[i] = arrowStyle()
+		case -1:
 			tiles[i] = otherStyle
-			continue
+		default:
+			if cols[i] < 0 {
+				tiles[i] = otherStyle
+				continue
+			}
+			tiles[i] = styleForHue(tilePalette[cols[i]])
 		}
-		tiles[i] = styleForHue(tilePalette[cols[i]])
 	}
 	return tiles
 }
@@ -212,6 +220,20 @@ var otherStyle = func() tileStyle {
 	}
 }()
 
+// arrowStyle is the gutter strip for a pagination arrow: a muted filler so the
+// edge of the treemap reads as a deliberate gutter, with an accent arrow glyph
+// that brightens via selGlyph when the strip is selected.
+func arrowStyle() tileStyle {
+	bg := lipgloss.Color(colFreeBG)
+	fg := lipgloss.Color(colDim)
+	return tileStyle{
+		fill:     lipgloss.NewStyle().Background(bg).Foreground(bg),
+		glyph:    lipgloss.NewStyle().Background(bg).Foreground(fg).Bold(true),
+		selFill:  lipgloss.NewStyle().Background(bg).Foreground(bg),
+		selGlyph: lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(colAccent)).Bold(true),
+	}
+}
+
 func hsvHex(h, s, v float64) string {
 	c := v * s
 	x := c * (1 - math.Abs(math.Mod(h/60.0, 2)-1))
@@ -327,9 +349,8 @@ func wrapText(s string, width int) []string {
 // current block in that axis, and the chosen one is the nearest such block
 // (smallest gap) best aligned with the current block's centre along the other
 // axis. That gives natural neighbour-to-neighbour movement across the tiles.
-// At a page's reading-order extreme with no block beyond, the move wraps to
-// the neighbouring page (arrows, vim keys, and the wheel all route through
-// here).
+// Pagination arrow strips are ordinary candidates, so arrow/vim keys reach them
+// and settling on one announces the neighbouring page.
 func (m *Model) moveSel(dx, dy int) {
 	if m.sel < 0 || len(m.rects) == 0 {
 		return
@@ -339,7 +360,7 @@ func (m *Model) moveSel(dx, dy int) {
 	var bestGap, bestAlign float64
 	for i := range m.rects {
 		r := &m.rects[i]
-		if r.Index < 0 || i == m.sel {
+		if i == m.sel || !isNavigableRect(r.Index) {
 			continue
 		}
 		gap, align, ok := directionScore(cur, r, dx, dy)
@@ -352,20 +373,13 @@ func (m *Model) moveSel(dx, dy int) {
 	}
 	if best >= 0 {
 		m.sel = best
-		return
 	}
-	// No block in that direction: wrap to the neighbouring page when the
-	// selection already sits at the page's extreme, so the bottom-right tail
-	// reads on naturally into the next page.
-	if dx > 0 || dy > 0 {
-		if m.sel == lastSelectable(m.rects) && m.nextPage() {
-			m.sel = firstSelectable(m.rects)
-		}
-		return
-	}
-	if m.sel == firstSelectable(m.rects) && m.prevPage() {
-		m.sel = lastSelectable(m.rects)
-	}
+}
+
+// isNavigableRect reports whether a rect index is a real directory tile (>=0)
+// or a pagination arrow strip, the only elements the selection may land on.
+func isNavigableRect(index int) bool {
+	return index >= 0 || index == idxPageNext || index == idxPagePrev
 }
 
 // directionScore reports how far block r lies beyond cur in the direction

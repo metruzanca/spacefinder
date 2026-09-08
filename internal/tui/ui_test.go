@@ -381,7 +381,9 @@ func selectChild(t *testing.T, m *Model, name string) {
 	t.Fatalf("child %q not found on any page", name)
 }
 
-func TestTabFlipsPages(t *testing.T) {
+// TestPgKeysFlipPages verifies pgup/pgdn flip pages and that tab is unbound:
+// pagination is explicit (pg keys or the arrow strips), never implicit.
+func TestPgKeysFlipPages(t *testing.T) {
 	m := multiPageModel()
 	if m.pageCount < 2 {
 		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
@@ -389,58 +391,175 @@ func TestTabFlipsPages(t *testing.T) {
 	if m.page != 0 {
 		t.Fatalf("initial page = %d, want 0", m.page)
 	}
-	got, _ := m.Update(keyType(tea.KeyTab))
+	// pgdn flips forward and lands on the first tile.
+	got, _ := m.Update(keyType(tea.KeyPgDown))
 	m = got.(*Model)
 	if m.page != 1 {
-		t.Fatalf("tab left page %d, want 1", m.page)
+		t.Fatalf("pgdn left page %d, want 1", m.page)
 	}
 	if m.sel != firstSelectable(m.rects) {
-		t.Fatal("tab did not select the first tile of the new page")
+		t.Fatal("pgdn did not select the first tile of the new page")
 	}
-	// PgUp goes back; Shift+Tab also goes back.
+	// pgup goes back and lands on the last tile.
 	got, _ = m.Update(keyType(tea.KeyPgUp))
 	m = got.(*Model)
 	if m.page != 0 {
 		t.Fatalf("pgup left page %d, want 0", m.page)
 	}
-	got, _ = m.Update(keyType(tea.KeyShiftTab))
+	if m.sel != lastSelectable(m.rects) {
+		t.Fatal("pgup did not select the last tile of the previous page")
+	}
+	// Neither key wraps around past the edges.
+	got, _ = m.Update(keyType(tea.KeyPgUp))
 	m = got.(*Model)
 	if m.page != 0 {
-		t.Fatalf("shift+tab wrapped past the first page to %d", m.page)
+		t.Fatalf("pgup past the first page went to %d, want 0", m.page)
+	}
+	for m.page < m.pageCount-1 {
+		got, _ = m.Update(keyType(tea.KeyPgDown))
+		m = got.(*Model)
+	}
+	got, _ = m.Update(keyType(tea.KeyPgDown))
+	m = got.(*Model)
+	if m.page != m.pageCount-1 {
+		t.Fatalf("pgdn past the last page went to %d, want %d", m.page, m.pageCount-1)
+	}
+	// tab is unbound: it must not flip pages.
+	got, _ = m.Update(keyType(tea.KeyTab))
+	m = got.(*Model)
+	if m.page != m.pageCount-1 {
+		t.Fatalf("tab flipped to page %d, want %d (unbound)", m.page, m.pageCount-1)
 	}
 }
 
-func TestMoveSelWrapsPages(t *testing.T) {
+// TestMoveSelDoesNotWrapPages verifies the selection moves between arrow strips
+// instead of wrapping across page edges: arrows are ordinary candidates.
+func TestMoveSelDoesNotWrapPages(t *testing.T) {
 	m := multiPageModel()
 	if m.pageCount < 2 {
 		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
 	}
-	// Moving past the last tile flips forward.
+	// Moving right past the last tile reaches the next-page arrow, not the
+	// next page.
 	m.sel = lastSelectable(m.rects)
 	before := m.page
 	m.moveSel(1, 0)
-	if m.page != before+1 {
-		t.Fatalf("right past the last tile: page %d, want %d", m.page, before+1)
+	if m.page != before {
+		t.Fatalf("right past the last tile flipped page %d → %d, want no wrap", before, m.page)
+	}
+	if m.selectedArrow() != 1 {
+		t.Fatalf("right of the last tile selected arrow %d, want the next-page arrow", m.selectedArrow())
+	}
+	// The grid edge pins the selection on the arrow.
+	m.moveSel(1, 0)
+	if m.sel != m.nextArrow {
+		t.Fatal("right of the next-page arrow should not move")
+	}
+	// No backward wrap past the first page.
+	w, h := m.treemapSize()
+	m.layoutPage(0, w, h)
+	m.sel = firstSelectable(m.rects)
+	m.moveSel(-1, 0)
+	if m.page != before || m.selectedArrow() != 0 {
+		t.Fatalf("left of the first tile moved to arrow=%d page=%d, want none on page 0", m.selectedArrow(), m.page)
+	}
+}
+
+// TestEnterActivatesPageArrows verifies arrow presence per page edge and that
+// Enter on an arrow flips the page and parks the selection on a real tile.
+func TestEnterActivatesPageArrows(t *testing.T) {
+	m := multiPageModel()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	w, h := m.treemapSize()
+	// Page 0 has only the next-page arrow.
+	m.layoutPage(0, w, h)
+	if m.prevArrow >= 0 {
+		t.Fatal("first page should not show a previous-page arrow")
+	}
+	if m.nextArrow < 0 {
+		t.Fatal("paged level should show a next-page arrow on the first page")
+	}
+	m.sel = m.nextArrow
+	got, _ := m.Update(keyType(tea.KeyEnter))
+	m = got.(*Model)
+	if m.page != 1 {
+		t.Fatalf("enter on the next arrow left page %d, want 1", m.page)
 	}
 	if m.sel != firstSelectable(m.rects) {
-		t.Fatal("forward wrap did not land on the first tile")
+		t.Fatal("enter on the next arrow did not select the first tile")
 	}
-	// Moving past the first tile flips back.
-	m.sel = firstSelectable(m.rects)
-	before = m.page
-	m.moveSel(-1, 0)
-	if m.page != before-1 {
-		t.Fatalf("left past the first tile: page %d, want %d", m.page, before-1)
+	// A middle page carries both arrows.
+	if m.pageCount >= 3 {
+		m.layoutPage(1, w, h)
+		if m.prevArrow < 0 || m.nextArrow < 0 {
+			t.Fatal("middle page should show both arrows")
+		}
+		m.sel = m.prevArrow
+		got, _ = m.Update(keyType(tea.KeyEnter))
+		m = got.(*Model)
+		if m.page != 0 || m.sel != lastSelectable(m.rects) {
+			t.Fatalf("enter on the previous arrow left page %d sel %d, want page 0 on the last tile", m.page, m.sel)
+		}
 	}
-	if m.sel != lastSelectable(m.rects) {
-		t.Fatal("backward wrap did not land on the last tile")
+	// The last page carries only the previous-page arrow.
+	m.layoutPage(m.pageCount-1, w, h)
+	if m.nextArrow >= 0 {
+		t.Fatal("last page should not show a next-page arrow")
 	}
-	// Vertical moves wrap too.
-	m.sel = lastSelectable(m.rects)
-	before = m.page
-	m.moveSel(0, 1)
-	if m.page != before+1 {
-		t.Fatalf("down past the last tile: page %d, want %d", m.page, before+1)
+	if m.prevArrow < 0 {
+		t.Fatal("paged level should show a previous-page arrow on the last page")
+	}
+	m.sel = m.prevArrow
+	got, _ = m.Update(keyType(tea.KeyEnter))
+	m = got.(*Model)
+	if m.page != m.pageCount-2 {
+		t.Fatalf("enter on the previous arrow left page %d, want %d", m.page, m.pageCount-2)
+	}
+}
+
+// TestArrowClickSelectsDoesNotFlip verifies a single click on an arrow strip
+// only selects it, and only a double-click flips.
+func TestArrowClickSelectsDoesNotFlip(t *testing.T) {
+	m := multiPageModel()
+	if m.pageCount < 2 {
+		t.Skipf("fixture produced %d pages, want 2+", m.pageCount)
+	}
+	w, h := m.treemapSize()
+	// Walk every page; pick the centre cell of the present arrow strips. Mouse
+	// events carry screen coordinates, offset by the two frame rows.
+	for p := 0; p < m.pageCount; p++ {
+		m.layoutPage(p, w, h)
+		if m.nextArrow >= 0 {
+			b := cellBounds(m.rects[m.nextArrow])
+			x, y := (b.x0+b.x1)/2, (b.y0+b.y1)/2+2
+			got, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+			if nm := got.(*Model); nm.page != p {
+				t.Fatalf("single click on next arrow flipped page %d → %d", p, nm.page)
+			} else if nm.selectedArrow() != 1 {
+				t.Fatalf("single click on next arrow selected %d, want 1", nm.selectedArrow())
+			}
+		}
+		if m.prevArrow >= 0 {
+			b := cellBounds(m.rects[m.prevArrow])
+			x, y := (b.x0+b.x1)/2, (b.y0+b.y1)/2+2
+			got, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+			if nm := got.(*Model); nm.page != p {
+				t.Fatalf("single click on prev arrow flipped page %d → %d", p, nm.page)
+			} else if nm.selectedArrow() != -1 {
+				t.Fatalf("single click on prev arrow selected %d, want -1", nm.selectedArrow())
+			}
+		}
+	}
+	// Two quick clicks on the same arrow strip flip the page.
+	m.layoutPage(0, w, h)
+	b := cellBounds(m.rects[m.nextArrow])
+	x, y := (b.x0+b.x1)/2, (b.y0+b.y1)/2+2
+	m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+	got, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+	if nm := got.(*Model); nm.page != 1 {
+		t.Fatalf("double-click on the next arrow left page %d, want 1", nm.page)
 	}
 }
 

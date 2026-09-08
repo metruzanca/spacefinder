@@ -19,6 +19,10 @@ const (
 	idxModalFG  = -3 // modal text
 	idxModalErr = -4
 	idxModalDim = -5 // dim description text in the help table
+
+	// Pagination arrow gutter strips (selectable, but not real directory tiles).
+	idxPageNext = -6 // arrow pointing to the next page
+	idxPagePrev = -7 // arrow pointing to the previous page
 )
 
 type rBounds struct{ x0, y0, x1, y1 int }
@@ -196,7 +200,32 @@ func (m *Model) frame(w, h int) ([][]int, [][]rune) {
 			drawLabelAt(buf, b, mid+1, m.tileMetric(node))
 		}
 	}
+
+	// Pagination arrows: a single glyph at the vertical centre of each strip.
+	if m.prevArrow >= 0 && m.prevArrow < len(m.rects) {
+		drawArrow(buf, bounds[m.prevArrow], '←')
+	}
+	if m.nextArrow >= 0 && m.nextArrow < len(m.rects) {
+		drawArrow(buf, bounds[m.nextArrow], '→')
+	}
 	return idxBuf, buf
+}
+
+// drawArrow places a pagination arrow glyph at the vertical centre of its
+// gutter strip.
+func drawArrow(buf [][]rune, b rBounds, ch rune) {
+	if b.y1-b.y0 < 3 {
+		return
+	}
+	row := b.y0 + (b.y1-b.y0)/2
+	if row < 0 || row >= len(buf) {
+		return
+	}
+	x := b.x0 + (b.x1-b.x0)/2
+	if x < 0 || x >= len(buf[row]) {
+		return
+	}
+	buf[row][x] = ch
 }
 
 // drawLabel places text centered on the middle row of the rectangle if it
@@ -269,8 +298,8 @@ type helpTableRow struct {
 func (m *Model) helpRows() []helpTableRow {
 	kb := []helpTableRow{
 		{left: "↑↓←→ / hjkl", right: "move the selection"},
-		{left: "tab / shift+tab", right: "next / previous page of tiles"},
-		{left: "enter", right: "drill into a folder"},
+		{left: "pgup / pgdn", right: "previous / next page of tiles"},
+		{left: "enter", right: "drill into a folder / flip a page arrow"},
 		{left: "esc", right: "go up a level"},
 		{left: "r", right: "rescan the current root"},
 		{left: "e", right: "show unreadable paths from the scan"},
@@ -283,8 +312,8 @@ func (m *Model) helpRows() []helpTableRow {
 	rows = append(rows, helpTableRow{}) // breathing room
 	rows = append(rows, helpTableRow{left: "MOUSE", header: true})
 	rows = append(rows,
-		helpTableRow{left: "click", right: "select a block"},
-		helpTableRow{left: "double-click", right: "drill into a folder / open a file"},
+		helpTableRow{left: "click", right: "select a block or a page arrow"},
+		helpTableRow{left: "double-click", right: "drill into a folder / open a file / flip a page arrow"},
 		helpTableRow{left: "right-click", right: "go up a level"},
 		helpTableRow{left: "wheel", right: "move the selection"},
 	)
@@ -561,6 +590,10 @@ func compose(tiles []tileStyle, idxBuf [][]int, buf [][]rune, w, h, sel int) []s
 				// Solid blocks keep tiles visible even when the terminal
 				// skips background colours.
 				fill = strings.Repeat("█", n)
+			default:
+				// Background runs stay width-preserving so edge strips on
+				// sparse rows keep their column position.
+				fill = strings.Repeat(" ", n)
 			}
 			sb.WriteString(styleOf(tiles, idx, sel, ch).Render(fill))
 			x += n
@@ -704,6 +737,12 @@ func (m *Model) infoLine() string {
 			if m.current != nil && m.current.Size > 0 {
 				left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
 			}
+		} else if dir := m.selectedArrow(); dir != 0 {
+			label := "previous page"
+			if dir > 0 {
+				label = "next page"
+			}
+			left = fmt.Sprintf(" %s %s", arrowRune(dir), label)
 		}
 		if m.current != nil {
 			right = fmt.Sprintf("%d children", len(m.current.Children))
@@ -773,7 +812,7 @@ func (m *Model) helpLineBindings() []keybind {
 		{"q", "quit"},
 	}
 	if m.pageCount > 1 {
-		kb = append([]keybind{{"tab", "next page"}}, kb...)
+		kb = append([]keybind{{"pgdn", "next page"}}, kb...)
 	}
 	if m.scanErrTotal > 0 {
 		kb = append([]keybind{{"e", fmt.Sprintf("errors(%d)", m.scanErrTotal)}}, kb...)
