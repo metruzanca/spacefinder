@@ -8,7 +8,7 @@ For detailed context on what this application does, see [docs/spec.md](docs/spec
 
 - `main.go` — thin entrypoint; loads godotenv, inits debug logging, calls `cmd.Execute()`
 - `cmd/` — Cobra command definitions; business logic lives in `internal/`, not here
-- `internal/logging/` — env-gated debug logging to a file (off by default, `GO_CLI_DEBUG`)
+- `internal/logging/` — env-gated debug logging to a file (off by default, `SPACEFINDER_DEBUG`; `SPACEFINDER_LOG` overrides the path). When enabled it writes a system/OS header and verbose DEBUG/ERROR lines.
 - `internal/config/` — optional TOML config, created on first use (`GO_CLI_CONFIG_PATH` override); wired in `main.go` as commented-out code
 - `.goreleaser.yaml` — release config (linux/darwin/windows, amd64/arm64) that injects version via ldflags
 - `.github/workflows/release.yml` — tags a `v*` run GoReleaser and publish GitHub Releases
@@ -41,6 +41,7 @@ For detailed context on what this application does, see [docs/spec.md](docs/spec
 - Write logs to a file, never stdout — logs must never disrupt the CLI/TUI output.
 - Gated by an env var and off by default; the same var can override the log path. Announce the path on stderr only when logging initializes.
 - Location: in the repo during dev, and `os.UserConfigDir()/spacefinder/` (e.g. `~/.config/spacefinder/`) in production.
+- Env gating: `SPACEFINDER_DEBUG=1` enables file logging; `SPACEFINDER_LOG` both enables it and overrides the path. Be verbose when on — log what the app is doing and every error, and open the file with a system/OS header (version, os/arch, go runtime, host, cwd, pid, args, env) so a captured log is self-contained for triage. Never log secrets.
 
 ## Testing
 

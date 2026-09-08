@@ -33,9 +33,9 @@ func TestRunSafeRecoversPanic(t *testing.T) {
 // log file, so the cause of a panic is never lost.
 func TestRunSafeLogsPanic(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "spacefinder.log")
-	t.Setenv("GO_CLI_LOG", logPath)
-	t.Setenv("GO_CLI_DEBUG", "1")
-	logging.Init()
+	t.Setenv("SPACEFINDER_LOG", logPath)
+	t.Setenv("SPACEFINDER_DEBUG", "1")
+	logging.Init("test")
 	t.Cleanup(logging.Close)
 
 	runSafe("test", func() tea.Msg { panic("boom-grade") })

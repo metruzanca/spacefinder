@@ -1,11 +1,16 @@
 // Package logging provides debug logging to a file. Logs never go to stdout or
 // stderr so the CLI/TUI output stays clean.
 //
-// Logging is disabled unless GO_CLI_DEBUG is set to a truthy value (or
-// GO_CLI_LOG is set). GO_CLI_LOG overrides the log file location; otherwise it
-// defaults to the repo root during development and
+// Logging is disabled unless SPACEFINDER_DEBUG is set to a truthy value (or
+// SPACEFINDER_LOG is set). SPACEFINDER_LOG overrides the log file location;
+// otherwise it defaults to the repo root during development and
 // os.UserConfigDir()/spacefinder/spacefinder.log (~/.config/spacefinder on Linux) in
 // production.
+//
+// When logging is enabled, the log opens with a system/OS header (version, OS,
+// architecture, runtime, process, environment) so a captured log is self-contained
+// and easy to triage, followed by verbose DEBUG/ERROR lines describing what the
+// app is doing.
 package logging
 
 import (
@@ -14,12 +19,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"time"
 )
 
 const (
-	envDebug = "GO_CLI_DEBUG"
-	envLog   = "GO_CLI_LOG"
+	envDebug = "SPACEFINDER_DEBUG"
+	envLog   = "SPACEFINDER_LOG"
 )
 
 var (
@@ -31,9 +38,10 @@ var (
 	Path string
 )
 
-// Init enables file logging when GO_CLI_DEBUG is set and opens the log file.
-// Returns whether logging is active.
-func Init() bool {
+// Init enables file logging when SPACEFINDER_DEBUG is set and opens the log
+// file. version is the application version (baked in via ldflags); it is
+// reported in the system header. Returns whether logging is active.
+func Init(version string) bool {
 	mu.Lock()
 	defer mu.Unlock()
 	if on {
@@ -71,8 +79,35 @@ func Init() bool {
 	logger = log.New(f, "", log.LstdFlags|log.Lmicroseconds)
 	fmt.Fprintf(os.Stderr, "spacefinder: debug log: %s\n", p)
 	// Log directly: Init already holds the mutex.
+	logSystemHeader(version)
 	logger.Printf("DEBUG started pid=%d args=%q", os.Getpid(), os.Args[1:])
 	return true
+}
+
+// logSystemHeader writes a self-contained system/OS header at the top of the
+// log so a captured file carries the environment it was produced in. Callers
+// must already hold the mutex.
+func logSystemHeader(version string) {
+	exec, _ := os.Executable()
+	cwd, _ := os.Getwd()
+	host, _ := os.Hostname()
+	home, _ := os.UserHomeDir()
+	config, _ := os.UserConfigDir()
+
+	env := []struct{ k, v string }{
+		{"SPACEFINDER_DEBUG", os.Getenv(envDebug)},
+		{"SPACEFINDER_LOG", os.Getenv(envLog)},
+		{"TERM", os.Getenv("TERM")},
+		{"COLORTERM", os.Getenv("COLORTERM")},
+		{"SHELL", os.Getenv("SHELL")},
+	}
+	logger.Printf("SYSTEM version=%q started=%s", version, time.Now().Format("2006-01-02T15:04:05-07:00"))
+	logger.Printf("SYSTEM os=%s arch=%s go=%s", runtime.GOOS, runtime.GOARCH, runtime.Version())
+	logger.Printf("SYSTEM host=%q home=%q config=%q", host, home, config)
+	logger.Printf("SYSTEM exec=%q cwd=%q pid=%d args=%q", exec, cwd, os.Getpid(), os.Args)
+	for _, e := range env {
+		logger.Printf("SYSTEM env %s=%q", e.k, e.v)
+	}
 }
 
 // Close closes the log file. Safe to call multiple times.
@@ -119,7 +154,7 @@ func logf(level, format string, args ...any) {
 }
 
 func debugEnabled() bool {
-	// GO_CLI_LOG alone is enough to enable file logging at that path.
+	// SPACEFINDER_LOG alone is enough to enable file logging at that path.
 	if os.Getenv(envLog) != "" {
 		return true
 	}

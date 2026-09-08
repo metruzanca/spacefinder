@@ -27,6 +27,7 @@ partitions.`,
 	SilenceUsage: true,
 	Version:      Version,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		logging.Debugf("command invoked: %s", cmd.CommandPath())
 		root := ""
 		if len(args) == 1 {
 			root = args[0]
@@ -36,7 +37,13 @@ partitions.`,
 		} else {
 			logging.Debugf("tui root path: %s", root)
 		}
-		return tui.Run(root)
+		err := tui.Run(root)
+		if err != nil {
+			logging.Errorf("tui exited with error: %v", err)
+			return err
+		}
+		logging.Debugf("tui exited cleanly")
+		return nil
 	},
 }
 

@@ -16,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/metruzanca/spacefinder/internal/logging"
 )
 
 // Progress is a throttle-sampled snapshot emitted while measuring. The counts
@@ -78,6 +80,7 @@ const maxStoredErrors = 100
 // recordError notes a path that could not be read.
 func (s *Scanner) recordError(path string, err error) {
 	s.errTotal++
+	logging.Errorf("scan error path=%q err=%v", path, err)
 	if len(s.errors) < maxStoredErrors {
 		s.errors = append(s.errors, ScanError{Path: path, Err: err})
 	}
@@ -109,8 +112,11 @@ func Measure(ctx context.Context, root string, ch chan<- Progress) (*Scanner, *N
 	if ch != nil {
 		defer close(ch)
 	}
+	start := time.Now()
+	logging.Debugf("measure starting: root=%q", root)
 	info, err := os.Lstat(root)
 	if err != nil {
+		logging.Errorf("measure failed to stat root=%q: %v", root, err)
 		return nil, nil, err
 	}
 	s := &Scanner{
@@ -121,6 +127,7 @@ func Measure(ctx context.Context, root string, ch chan<- Progress) (*Scanner, *N
 	th := &throttle{ch: ch, last: time.Now(), root: rootNode.Path}
 	if info.IsDir() {
 		if err := s.measureDir(ctx, rootNode.Path, info, infoDev(info), th); err != nil {
+			logging.Errorf("measure failed walking root=%q: %v", root, err)
 			return nil, nil, err
 		}
 		rootNode.Size = s.totals[rootNode.Path]
@@ -129,8 +136,10 @@ func Measure(ctx context.Context, root string, ch chan<- Progress) (*Scanner, *N
 	}
 	th.flush()
 	if err := s.Expand(ctx, rootNode); err != nil {
+		logging.Errorf("measure failed expanding root=%q: %v", root, err)
 		return nil, nil, err
 	}
+	logging.Debugf("measure complete: root=%q size=%d errors=%d took=%s", root, rootNode.Size, s.errTotal, time.Since(start))
 	return s, rootNode, nil
 }
 
@@ -142,10 +151,13 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 	if node == nil || !node.IsDir || node.Children != nil {
 		return nil
 	}
+	start := time.Now()
+	logging.Debugf("expand starting: dir=%q", node.Path)
 	entries, err := os.ReadDir(node.Path)
 	if err != nil {
 		s.recordError(node.Path, err)
 		node.Children = []*Node{} // non-nil marks the directory as expanded
+		logging.Debugf("expand yielded no entries (unreadable): dir=%q", node.Path)
 		return nil
 	}
 	// Device of node itself, for the same mount-point check the walk applies:
@@ -187,6 +199,7 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 	} else {
 		node.Size = total
 	}
+	logging.Debugf("expand complete: dir=%q entries=%d size=%d took=%s", node.Path, len(node.Children), node.Size, time.Since(start))
 	return nil
 }
 

@@ -14,7 +14,7 @@ func main() {
 	// Load dev-time env overrides from a repo-local .env (see AGENTS.md).
 	_ = godotenv.Load()
 
-	logging.Init()
+	logging.Init(cmd.Version)
 	defer logging.Close()
 
 	// Uncomment to load (and create on first use) the config file:

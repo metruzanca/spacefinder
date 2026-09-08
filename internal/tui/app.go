@@ -229,6 +229,9 @@ func newModel(rootPath string) *Model {
 		m.rootPath = ""
 		m.mode = modePicker
 		m.setupPicker()
+		logging.Debugf("tui starting in picker mode (%d targets)", len(m.pickerNodes))
+	} else {
+		logging.Debugf("tui starting in scan mode (root=%q)", m.rootPath)
 	}
 	return m
 }
@@ -373,8 +376,10 @@ func (m *Model) tileMetric(node *scan.Node) string {
 // Run starts the TUI in the alt-screen and blocks until it exits.
 func Run(rootPath string) error {
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
+		logging.Errorf("refusing to run: stdout is not a terminal")
 		return errors.New("spacefinder is an interactive terminal app; run it in a terminal")
 	}
+	logging.Debugf("tui starting (root=%q, terminal detected)", rootPath)
 	p := tea.NewProgram(newModel(rootPath), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	// Mirror stray stdout writes (bubbletea's own recovered-panic traces,
 	// debug.PrintStack output) into the debug log so a panic outside our
@@ -384,6 +389,11 @@ func Run(rootPath string) error {
 		defer teeStdout(lw)()
 	}
 	_, err := p.Run()
+	if err != nil {
+		logging.Errorf("tui program error: %v", err)
+	} else {
+		logging.Debugf("tui program exited cleanly")
+	}
 	return err
 }
 
@@ -590,10 +600,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pending = nil
 		if msg.err != nil {
+			logging.Errorf("expand failed (dir=%q): %v", msg.node.Path, msg.err)
 			m.mode = modeError
 			m.errMessage = msg.err.Error()
 			return m, nil
 		}
+		logging.Debugf("expanded dir=%q children=%d size=%d", msg.node.Path, len(msg.node.Children), msg.node.Size)
 		m.crumbs = append(m.crumbs, m.current)
 		m.current = msg.node
 		m.mode = modeBrowse
@@ -603,6 +615,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cwdSizeMsg:
 		if m.pickerCwd != nil && msg.size > 0 {
+			logging.Debugf("cwd du estimate arrived: size=%d", msg.size)
 			m.pickerCwd.Size = msg.size
 			m.pickerUsed[m.pickerCwd] = true
 			m.buildPickerLayout()
@@ -611,30 +624,44 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openDoneMsg:
 		if msg.err != nil {
+			logging.Errorf("open failed (path=%q): %v", msg.path, msg.err)
 			m.mode = modeError
 			m.errMessage = fmt.Sprintf("open %s: %v", msg.path, msg.err)
+		} else {
+			logging.Debugf("launched path=%q", msg.path)
 		}
 		return m, nil
 
 	case internalErrMsg:
+		logging.Errorf("internal error surfaced to UI: op=%q err=%v", msg.op, msg.err)
 		m.mode = modeError
 		m.errMessage = msg.err.Error()
 		return m, nil
 
 	case scanDoneMsg:
 		if msg.gen != m.scanGen {
+			logging.Debugf("ignoring stale scan result (gen=%d, want %d)", msg.gen, m.scanGen)
 			return m, nil // result of a cancelled rescan
 		}
 		if msg.err != nil {
+			logging.Errorf("measure failed (root=%q): %v", m.rootPath, msg.err)
 			m.mode = modeError
 			m.errMessage = msg.err.Error()
 			return m, nil
+		}
+		if msg.scanner != nil {
+			logging.Debugf("measure complete: root=%q size=%d children=%d errTotal=%d took=%s",
+				m.rootPath, msg.root.Size, len(msg.root.Children), msg.scanner.TotalErrors(), time.Since(m.start))
+		} else {
+			logging.Debugf("measure complete: root=%q size=%d children=%d took=%s",
+				m.rootPath, msg.root.Size, len(msg.root.Children), time.Since(m.start))
 		}
 		m.scanner = msg.scanner
 		m.tree = msg.root
 		m.current = msg.root
 		m.crumbs = nil
 		m.freeBytes = freeOn(m.rootPath)
+		logging.Debugf("free bytes on scan root: %d", m.freeBytes)
 		m.refreshScanErrors()
 		// Drop the animation scaffolding; the browse layout takes over.
 		m.scanRoot = nil
@@ -666,6 +693,12 @@ func (m *Model) refreshScanErrors() {
 	}
 	m.scanErrors = m.scanner.Errors()
 	m.scanErrTotal = m.scanner.TotalErrors()
+	if m.scanErrTotal > 0 {
+		logging.Errorf("scan encountered %d unreadable path(s)", m.scanErrTotal)
+		for _, se := range m.scanErrors {
+			logging.Errorf("  unreadable path=%q err=%v", se.Path, se.Err)
+		}
+	}
 }
 
 func (m *Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -980,11 +1013,13 @@ func (m *Model) doDelete() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := os.RemoveAll(n.Path); err != nil {
+		logging.Errorf("delete failed (path=%q): %v", n.Path, err)
 		m.mode = modeError
 		m.errMessage = fmt.Sprintf("delete %s: %v", n.Path, err)
 		m.confirmNode = nil
 		return m, nil
 	}
+	logging.Debugf("deleted path=%q size=%d", n.Path, n.Size)
 	// Detach the node from its parent and subtract its size from every ancestor
 	// (the parent `current` and everything above it in the crumb stack).
 	for i, c := range m.current.Children {
@@ -1010,6 +1045,7 @@ func (m *Model) doDelete() (tea.Model, tea.Cmd) {
 // rescan starts a fresh measure of the root and returns the command batch to
 // run it. Existing scan work is cancelled and its result will be ignored.
 func (m *Model) rescan() tea.Cmd {
+	logging.Debugf("rescan requested (root=%q)", m.rootPath)
 	if m.cancelScan != nil {
 		m.cancelScan()
 	}
@@ -1061,6 +1097,7 @@ func (m *Model) openFile() tea.Cmd {
 		return nil
 	}
 	path := n.Path
+	logging.Debugf("opening file in default app: %q", path)
 	return func() tea.Msg {
 		return runSafe("open "+path, func() tea.Msg {
 			if err := openDefault(path).Start(); err != nil {
