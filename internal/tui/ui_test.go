@@ -278,13 +278,26 @@ func bestContrast(hex string) float64 {
 	return dark
 }
 
-// TestPaletteDistinct asserts the palette holds no near-duplicate colours: hues
-// are spread evenly (≥30° apart) and each renders a unique fill, so two tiles
-// can only look the same when they are not adjacent.
+// TestPaletteDistinct asserts the palette holds no near-duplicate colours: every
+// pair of hues stays ≥30° apart around the wheel, and each renders a unique
+// fill, so two tiles can only look the same when they are not adjacent. The
+// palette order is a priority, not a sort, so the check is order-independent.
 func TestPaletteDistinct(t *testing.T) {
-	for i := 1; i < len(tilePalette); i++ {
-		if d := tilePalette[i] - tilePalette[i-1]; d < 30 {
-			t.Fatalf("palette hues too close together: %v", tilePalette)
+	dist := func(a, b float64) float64 {
+		d := a - b
+		if d < 0 {
+			d = -d
+		}
+		if d > 180 {
+			d = 360 - d
+		}
+		return d
+	}
+	for i := 0; i < len(tilePalette); i++ {
+		for j := i + 1; j < len(tilePalette); j++ {
+			if d := dist(tilePalette[i], tilePalette[j]); d < 30 {
+				t.Fatalf("palette hues %v and %v too close together: %v", tilePalette[i], tilePalette[j], tilePalette)
+			}
 		}
 	}
 	seen := map[string]bool{}

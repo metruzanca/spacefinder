@@ -49,13 +49,22 @@ type tileStyle struct {
 	selGlyph lipgloss.Style // label glyphs, selected
 }
 
-// tilePalette is the fixed set of tile fill hues, spread evenly around the
-// colour wheel so no two are ever similar. Colouring from this palette — rather
-// than hashing a name to an arbitrary hue — means no near-identical fills exist
-// to land on adjacent blocks, and the greedy assignment in assignColors keeps
-// every edge-adjacent pair on different colours.
+// tilePalette is the fixed set of tile fill hues, kept ≥30° apart so no two are
+// ever similar. Green and lime hues are deliberately excluded — they read too
+// alike — in favour of blues and purples for clearer separation. Colouring from
+// this palette rather than hashing a name to an arbitrary hue means no near-
+// identical fills exist to land on adjacent blocks, and the greedy assignment
+// in assignColors keeps every edge-adjacent pair on different colours.
 var tilePalette = []float64{
-	0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330,
+	210, // blue
+	240, // royal blue
+	270, // violet
+	330, // pink
+	0,   // red
+	30,  // orange
+	60,  // yellow
+	180, // cyan
+	300, // magenta
 }
 
 // styleForHue builds the normal/selected styles for one palette hue, using the
