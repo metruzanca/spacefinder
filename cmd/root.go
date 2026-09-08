@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -9,7 +10,34 @@ import (
 	"github.com/metruzanca/spacefinder/internal/tui"
 )
 
+// Version is the release version, injected at build time via ldflags for
+// release artifacts. When built with `go install pkg@version` no ldflags apply,
+// so the fallback in init() fills it from the module version embedded by the
+// go tool.
 var Version = "dev"
+
+func init() {
+	if Version == "dev" {
+		if v := moduleVersion(); v != "" {
+			Version = v
+		}
+	}
+	rootCmd.Version = Version
+}
+
+// moduleVersion returns the main-module version recorded in the binary's build
+// info, e.g. "v0.7.0" for `go install spacefinder@v0.7.0`, or "" when it is not
+// available (a local build compiled without a module version).
+func moduleVersion() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	return ""
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "spacefinder [path]",
@@ -25,7 +53,6 @@ home, root, the current directory, and any other detected drives or
 partitions.`,
 	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
-	Version:      Version,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logging.Debugf("command invoked: %s", cmd.CommandPath())
 		root := ""
