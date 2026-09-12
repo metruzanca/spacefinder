@@ -63,6 +63,10 @@ func TestFormatBytes(t *testing.T) {
 		{1048576, "1.0 MB"},
 		{3 * 1024 * 1024 * 1024, "3.0 GB"},
 		{5 * 1024 * 1024 * 1024 * 1024, "5.0 TB"},
+		// Bogus stat sizes must never render as an absurd petabytes figure.
+		{int64(7000) << 50, ">1 EiB"},
+		{1 << 62, ">1 EiB"},
+		{-5, "-5 B"},
 	}
 	for _, c := range cases {
 		if got := formatBytes(c.in); got != c.want {

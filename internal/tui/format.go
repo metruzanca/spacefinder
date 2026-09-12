@@ -416,7 +416,10 @@ func directionScore(cur, r *treemap.Rect, dx, dy int) (gap, align float64, ok bo
 	return 0, 0, false
 }
 
-// formatBytes renders a byte count in human units (B/KB/MB/GB/TB).
+// formatBytes renders a byte count in human units (B/KB/MB/GB/TB). Inputs so
+// large they would render in petabytes are impossible for real storage and
+// only come from bogus stat results, so they render as a marker of absurdity
+// rather than a misleading figure.
 func formatBytes(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
@@ -428,6 +431,9 @@ func formatBytes(n int64) string {
 		if v < 1024 {
 			return fmt.Sprintf("%.1f %s", v, u)
 		}
+	}
+	if v/1024 >= 1024 {
+		return ">1 EiB"
 	}
 	return fmt.Sprintf("%.1f PB", v/1024)
 }

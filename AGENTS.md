@@ -42,6 +42,7 @@ For detailed context on what this application does, see [docs/spec.md](docs/spec
 - Gated by an env var and off by default; the same var can override the log path. Announce the path on stderr only when logging initializes.
 - Location: in the repo during dev, and `os.UserConfigDir()/spacefinder/` (e.g. `~/.config/spacefinder/`) in production.
 - Env gating: `SPACEFINDER_DEBUG=1` enables file logging; `SPACEFINDER_LOG` both enables it and overrides the path. Be verbose when on — log what the app is doing and every error, and open the file with a system/OS header (version, os/arch, go runtime, host, cwd, pid, args, env) so a captured log is self-contained for triage. Never log secrets.
+- Scanner: sizes are `stat.Blocks*512` (du-style); entries whose du size is implausible (> ~1 PiB, from bogus drvfs/9p stats) are dropped as scan errors. On WSL `/mnt` scans, known Windows system folders (`Windows`, `Program Files`, `ProgramData`, ...) are skipped by default and shown as approximate-only (`~`, not explorable); `SPACEFINDER_NO_SKIP=1` opts out.
 
 ## Testing
 

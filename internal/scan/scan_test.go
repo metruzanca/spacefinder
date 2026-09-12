@@ -371,6 +371,64 @@ func TestExpandReMeasuresMissingSubdir(t *testing.T) {
 	}
 }
 
+func TestImplausibleSize(t *testing.T) {
+	ok := []int64{0, 1, 4096, maxSaneSize}
+	for _, n := range ok {
+		if implausibleSize(n) {
+			t.Errorf("implausibleSize(%d) = true, want false", n)
+		}
+	}
+	bad := []int64{-1, maxSaneSize + 1, int64(7000) << 50, 1 << 62}
+	for _, n := range bad {
+		if !implausibleSize(n) {
+			t.Errorf("implausibleSize(%d) = false, want true", n)
+		}
+	}
+}
+
+func TestSystemDirName(t *testing.T) {
+	for _, name := range []string{"Windows", "windows", "SYSTEM Volume Information", "Program Files (x86)", "$Recycle.Bin", "ProgramData"} {
+		if !systemDirName(name) {
+			t.Errorf("systemDirName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"Users", "projects", "Documents", "win", "Sysadmin"} {
+		if systemDirName(name) {
+			t.Errorf("systemDirName(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestSkipSystemDir(t *testing.T) {
+	t.Setenv("SPACEFINDER_NO_SKIP", "")
+	cases := []struct {
+		wsl      bool
+		parent   string
+		name     string
+		wantSkip bool
+	}{
+		{wsl: true, parent: "/mnt/c", name: "Windows", wantSkip: true},
+		{wsl: true, parent: "/mnt/c", name: "windows", wantSkip: true},
+		{wsl: true, parent: "/mnt/c", name: "$Recycle.Bin", wantSkip: true},
+		{wsl: true, parent: "/mnt/d/Users/me", name: "Windows", wantSkip: true},
+		{wsl: true, parent: "/mnt/c", name: "Users", wantSkip: false},
+		{wsl: false, parent: "/mnt/c", name: "Windows", wantSkip: false},
+		{wsl: true, parent: "/", name: "Windows", wantSkip: false},
+		{wsl: true, parent: "/home/me", name: "Windows", wantSkip: false},
+	}
+	for _, c := range cases {
+		if got := skipSystemDir(c.wsl, c.parent, c.name); got != c.wantSkip {
+			t.Errorf("skipSystemDir(wsl=%v, parent=%q, name=%q) = %v, want %v", c.wsl, c.parent, c.name, got, c.wantSkip)
+		}
+	}
+
+	// The env kill-switch opts out even on a WSL /mnt path.
+	t.Setenv("SPACEFINDER_NO_SKIP", "1")
+	if skipSystemDir(true, "/mnt/c", "Windows") {
+		t.Fatal("skipSystemDir honored SPACEFINDER_NO_SKIP=1")
+	}
+}
+
 func TestMeasureIgnoresMountLikeDirs(t *testing.T) {
 	// A directory whose st_dev differs from its parent is treated as a leaf
 	// (du -x). We cannot mount in unprivileged tests, but the same-deviceness

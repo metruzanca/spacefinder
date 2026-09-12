@@ -12,9 +12,11 @@ package scan
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/metruzanca/spacefinder/internal/logging"
@@ -50,6 +52,7 @@ type Node struct {
 	Path     string
 	Size     int64
 	IsDir    bool
+	Approx   bool // Size is an estimate, not a measured total (excluded subtree)
 	Parent   *Node
 	Children []*Node // nil until the directory has been expanded
 }
@@ -59,6 +62,7 @@ type Node struct {
 // expand directories lazily.
 type Scanner struct {
 	totals map[string]int64
+	approx map[string]bool // paths whose subtrees were skipped, sized approximately
 	seen   map[fileID]struct{}
 
 	errors   []ScanError
@@ -104,6 +108,63 @@ type fileID struct {
 	ino uint64
 }
 
+// maxSaneSize is the largest du-style size a single entry can plausibly
+// report (~1 PiB). Larger values come from bogus stat results (e.g. drvfs/9p
+// stats on guarded Windows entries) and are dropped so they cannot inflate
+// every ancestor's total up to the scan root.
+const maxSaneSize = 1 << 50
+
+// implausibleSize reports whether a du-style byte count cannot be real.
+func implausibleSize(n int64) bool {
+	return n < 0 || n > maxSaneSize
+}
+
+// systemDirNames are Windows system folders whose content is host-managed,
+// read-only, or not user data. On WSL the Windows drive's version of these is
+// expensive to walk (a slow 9p round-trip per entry) and mostly unreadable,
+// so their subtrees are skipped by default and shown with an approximate size.
+// Matched case-insensitively.
+var systemDirNames = map[string]bool{
+	"$recycle.bin":              true,
+	"system volume information": true,
+	"windows":                   true,
+	"program files":             true,
+	"program files (x86)":       true,
+	"programdata":               true,
+	"perflogs":                  true,
+	"recovery":                  true,
+	"documents and settings":    true,
+	"application data":          true,
+	"local settings":            true,
+}
+
+// systemDirName reports whether name is a known Windows system folder
+// (case-insensitive).
+func systemDirName(name string) bool {
+	return systemDirNames[strings.ToLower(name)]
+}
+
+// systemSkipDisabled reports whether the user opted out of the default
+// Windows system-folder skip entirely.
+func systemSkipDisabled() bool {
+	return os.Getenv("SPACEFINDER_NO_SKIP") != ""
+}
+
+// skipSystemDir reports whether a directory subtree should be skipped: its
+// name matches a known Windows system folder and it lives under a /mnt drive
+// mount on WSL. The mount-prefix gate keeps the name heuristic from touching
+// ordinary Linux trees that happen to contain such a folder.
+func skipSystemDir(wsl bool, parentDir, name string) bool {
+	if !wsl || systemSkipDisabled() {
+		return false
+	}
+	if !systemDirName(name) {
+		return false
+	}
+	return strings.HasPrefix(parentDir, "/mnt/") ||
+		strings.HasPrefix(filepath.Join(parentDir, name), "/mnt/")
+}
+
 // Measure walks root once, recording the total size of every directory, and
 // materializes root's immediate children into the returned tree. Progress is
 // sent (throttled) on ch when ch is non-nil; ch is closed before Measure
@@ -121,6 +182,7 @@ func Measure(ctx context.Context, root string, ch chan<- Progress) (*Scanner, *N
 	}
 	s := &Scanner{
 		totals: map[string]int64{},
+		approx: map[string]bool{},
 		seen:   map[fileID]struct{}{},
 	}
 	rootNode := &Node{Name: filepath.Base(root), Path: filepath.Clean(root), IsDir: info.IsDir()}
@@ -177,15 +239,24 @@ func (s *Scanner) Expand(ctx context.Context, node *Node) error {
 			continue
 		}
 		full := filepath.Join(node.Path, e.Name())
-		child := &Node{Name: e.Name(), Path: full, IsDir: stat.IsDir(), Parent: node}
+		approx := s.approx[full]
+		child := &Node{Name: e.Name(), Path: full, IsDir: stat.IsDir(), Approx: approx, Parent: node}
 		if stat.IsDir() {
-			if dev := infoDev(stat); dev != 0 && dev != parentDev {
+			if approx {
+				// Excluded in the measure pass (system dir): keep its own-entry
+				// size and never re-walk it lazily.
+				child.Size = infoSize(stat)
+			} else if dev := infoDev(stat); dev != 0 && dev != parentDev {
 				child.Size = infoSize(stat)
 			} else {
 				child.Size = s.totalOrMeasure(ctx, full, stat)
 			}
 		} else {
 			child.Size = infoSize(stat)
+		}
+		if implausibleSize(child.Size) {
+			s.recordError(full, fmt.Errorf("implausible du size %d bytes", child.Size))
+			child.Size = 0
 		}
 		total += child.Size
 		children = append(children, child)
@@ -233,6 +304,9 @@ func (s *Scanner) measureDir(ctx context.Context, path string, info fs.FileInfo,
 	if total < 0 {
 		total = infoSize(info)
 	}
+	if implausibleSize(total) {
+		total = 0
+	}
 	s.totals[path] = total
 	return nil
 }
@@ -267,6 +341,15 @@ func (s *Scanner) measureEntries(ctx context.Context, path string, parentDev uin
 			childSize = infoSize(stat)
 		case stat.IsDir():
 			isDir = true
+			if skipSystemDir(WSL(), path, e.Name()) {
+				// Host-managed Windows tree (System32, ProgramData, ...):
+				// descending costs many slow 9p round-trips to reach files the
+				// user cannot read or delete anyway. Size it approximately.
+				childSize = infoSize(stat)
+				s.approx[full] = true
+				logging.Debugf("skipping Windows system dir (approx): %q", full)
+				break
+			}
 			dev := infoDev(stat)
 			if dev != 0 && dev != parentDev {
 				// Different filesystem: treat as a leaf (du -x).
@@ -278,6 +361,11 @@ func (s *Scanner) measureEntries(ctx context.Context, path string, parentDev uin
 			}
 		default:
 			childSize = s.dedupSize(stat)
+		}
+		if implausibleSize(childSize) {
+			s.recordError(full, fmt.Errorf("implausible du size %d bytes", childSize))
+			th.report(0, 1, full)
+			childSize = 0
 		}
 		total += childSize
 		// A direct child of the scan root is "explored" the moment its size is

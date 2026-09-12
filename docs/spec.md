@@ -111,6 +111,19 @@ The scan behaves like `du -x -B1 --max-depth=1` but is lazy:
   matching `du`.
 - **Single filesystem**: mount points are treated as leaves.
 - **Hardlinks counted once**.
+- **WSL Windows system dirs skipped**: while scanning a `/mnt` drive mount on
+  WSL, known host-managed folder names (`Windows`, `Program Files`,
+  `ProgramData`, `$Recycle.Bin`, `System Volume Information`, ...) are not
+  descended into — their deep trees cost many slow 9p round-trips to reach
+  read-only files the user cannot delete anyway. The folder still shows in the
+  treemap with an approximate (own-entry) size marked `~`, and is not
+  explorable. `SPACEFINDER_NO_SKIP=1` opts out. Top-level system *files*
+  (e.g. `pagefile.sys`, `hiberfil.sys`) are still measured — each is one cheap
+  stat and often the biggest consumer on the drive.
+- **Implausible sizes dropped**: any entry whose stat reports a du size larger
+  than ~1 PiB (bogus drvfs/9p stats on guarded Windows entries) is recorded as
+  a scan error and counted as zero, so a single bad stat cannot inflate every
+  ancestor total up to the scan root.
 - **Lazy expansion**: the treemap materializes one level at a time; drilling
   into a folder is a `readdir` plus a look-up in the recorded totals
   (measure-then-open). No "unmeasured tiles" are rendered because every shown

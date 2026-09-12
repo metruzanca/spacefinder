@@ -376,9 +376,14 @@ func (m *Model) selectedPickerNode() *scan.Node {
 }
 
 // tileMetric is the secondary label drawn under a tile's name: free bytes for
-// filesystems, a "~" rough du estimate for the current directory.
+// filesystems, a "~" rough du estimate for the current directory. Excluded
+// subtrees (Windows system dirs) also carry "~" to mark their size as an
+// approximation, not a measured total.
 func (m *Model) tileMetric(node *scan.Node) string {
 	s := formatBytes(node.Size)
+	if node.Approx {
+		return "~" + s
+	}
 	if node.Size > 0 && m.pickerUsed[node] {
 		return "~" + s
 	}
@@ -1091,10 +1096,13 @@ func (m *Model) rescan() tea.Cmd {
 
 // drill opens the selected directory. If its children have not been expanded
 // yet, it starts a measurement pass first (measure-then-open) and returns the
-// command to run it.
+// command to run it. Excluded subtrees (system dirs) are never traversed.
 func (m *Model) drill() tea.Cmd {
 	n := m.selectedNode()
 	if n == nil || !n.IsDir {
+		return nil
+	}
+	if n.Approx {
 		return nil
 	}
 	if n.Children == nil && m.scanner != nil {

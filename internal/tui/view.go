@@ -734,6 +734,9 @@ func (m *Model) infoLine() string {
 	default:
 		if n := m.selectedNode(); n != nil {
 			left = fmt.Sprintf(" ▸ %s [%s]", n.Name, formatBytes(n.Size))
+			if n.Approx {
+				left += " ~ excluded (system, not scanned)"
+			}
 			if m.current != nil && m.current.Size > 0 {
 				left += fmt.Sprintf(" · %.1f%%", 100*float64(n.Size)/float64(m.current.Size))
 			}
